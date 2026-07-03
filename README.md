@@ -73,7 +73,7 @@ connect:
   "mcpServers": {
     "qscreener": {
       "type": "streamable-http",
-      "url": "https://mcp-dev.qualityscreener.io/mcp"
+      "url": "https://mcp.qualityscreener.io/mcp"
     }
   }
 }
@@ -289,7 +289,7 @@ Any `streamable-http` MCP client works. No token needed — OAuth handles login:
   "mcpServers": {
     "qscreener": {
       "type": "streamable-http",
-      "url": "https://mcp-dev.qualityscreener.io/mcp"
+      "url": "https://mcp.qualityscreener.io/mcp"
     }
   }
 }
@@ -301,7 +301,7 @@ If your client cannot perform the OAuth flow, send a minted token directly:
 {
   "mcpServers": {
     "qscreener": {
-      "url": "https://mcp-dev.qualityscreener.io/mcp",
+      "url": "https://mcp.qualityscreener.io/mcp",
       "headers": { "X-Stobot-CLI-Token": "<your token>" }
     }
   }

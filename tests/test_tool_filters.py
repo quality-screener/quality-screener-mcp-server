@@ -85,6 +85,28 @@ def test_score_compute_omits_unset_filters(patch_guard) -> None:
     assert "countries" not in client.calls[0]["json"]["filters"]
 
 
+def test_scores_for_tickers_posts_upper_cased_tickers(patch_guard) -> None:
+    """``scores_for_tickers`` upper-cases tickers and posts them to the by-tickers endpoint."""
+    client = patch_guard({"data": []})
+    server.scores_for_tickers(tickers=["aapl", "Msft"])
+    assert client.calls[0]["path"] == "/v1/scores/by-tickers"
+    assert client.calls[0]["json"]["tickers"] == ["AAPL", "MSFT"]
+
+
+def test_scores_for_tickers_forwards_scoring_system_id(patch_guard) -> None:
+    """A supplied scoring system id is forwarded in the request body."""
+    client = patch_guard({"data": []})
+    server.scores_for_tickers(tickers=["AAPL"], scoring_system_id=12)
+    assert client.calls[0]["json"]["scoring_system_id"] == 12
+
+
+def test_scores_for_tickers_omits_scoring_system_id_when_unset(patch_guard) -> None:
+    """When no scoring system is given, the key is omitted (default scoring)."""
+    client = patch_guard({"data": []})
+    server.scores_for_tickers(tickers=["AAPL"])
+    assert "scoring_system_id" not in client.calls[0]["json"]
+
+
 def test_screen_share_builds_full_url(monkeypatch: pytest.MonkeyPatch, patch_guard) -> None:
     """``screen_share`` returns a copy-pasteable URL derived from the website base URL."""
     monkeypatch.setattr(server, "_WEBSITE_URL", "https://app.example.com")

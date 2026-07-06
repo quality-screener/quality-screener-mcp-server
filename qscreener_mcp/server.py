@@ -269,6 +269,30 @@ def scores_show(ticker: str) -> dict:
 
 
 @mcp.tool()
+def scores_for_tickers(tickers: list[str], scoring_system_id: Optional[int] = None) -> dict:
+    """Return current scores for a specific list of tickers.
+
+    Looks up the latest score for each requested ticker under the default quality
+    score, or under a saved scoring system when ``scoring_system_id`` is given (which
+    requires being signed in and owning that system). Tickers with no score are
+    omitted from the response. Results are sorted by quality score descending.
+
+    Args:
+        tickers: Exact ticker symbols to score (e.g. ["AAPL", "MSFT", "ASML.AS"]).
+        scoring_system_id: Optional saved scoring-system id; omit for default scoring.
+
+    Returns:
+        dict: A ScoreListResponse with ``data`` (one row per found ticker),
+        ``pagination`` (``total_count`` = number found), and ``aggregates``.
+    """
+    body = _clean({
+        "tickers": [t.upper() for t in tickers],
+        "scoring_system_id": scoring_system_id,
+    })
+    return _guard(lambda c: c.post("/v1/scores/by-tickers", json=body))
+
+
+@mcp.tool()
 def scores_statistics(
     sectors: Optional[list[str]] = None,
     min_score: Optional[float] = None,

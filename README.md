@@ -194,6 +194,7 @@ All tools require authentication. Filters use **OR logic within a filter** and
 | `scores_top` | `scores_top(limit=20)` | Top tickers by quality score, as a `{ticker: score}` map. |
 | `scores_list` | `scores_list(ticker=None, sectors=None, industries=None, countries=None, currencies=None, exchanges=None, min_score=None, max_score=None, min_market_cap_usd=None, max_market_cap_usd=None, sort_by="quality_score", sort_order="desc", offset=0, limit=50, include_duplicates=False)` | List scored tickers with optional filters. |
 | `scores_show` | `scores_show(ticker)` | Full score row(s) for a single ticker. |
+| `scores_for_tickers` | `scores_for_tickers(tickers, scoring_system_id=None)` | Current scores for a specific list of tickers, under default scoring or a saved scoring system. Unknown tickers are omitted. |
 | `scores_statistics` | `scores_statistics(sectors=None, min_score=None, max_score=None, min_market_cap_usd=None, max_market_cap_usd=None)` | Min / max / average score statistics for a filtered universe. |
 | `scores_market_cap` | `scores_market_cap(sectors=None, min_score=None)` | Aggregated total market cap (USD) for a filtered universe. |
 | `score_compute` | `score_compute(config, sectors=None, industries=None, countries=None, currencies=None, exchanges=None, min_market_cap_usd=None, max_market_cap_usd=None, sort_by="quality_score", sort_order="desc", offset=0, limit=50, include_duplicates=False)` | Compute custom scores from a `CustomScoreConfig`, restricted to a filtered universe. |

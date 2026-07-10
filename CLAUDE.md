@@ -44,7 +44,7 @@ Three modules under `qscreener_mcp/`:
 - Tickers are upper-cased before sending (`ticker.upper()`).
 - Market-cap parameters are named `*_usd` in the tool signature and mapped to the backend's `min_market_cap`/`max_market_cap` by `_filters`. Market caps are always USD.
 - `_clean()` drops `None`-valued keys; `_filters()` additionally collapses empty lists to `None` so unset filters are omitted entirely (an omitted filter = unfiltered universe). Filter semantics: **OR within a filter, AND across filters.**
-- `score_compute`, `screen_share`, and the `systems_*` tools take a `CustomScoreConfig` dict (weighted metric groups → weighted metrics, plus stats options like `winsorize`/`zScore`); see the README example.
+- `score_compute`, `screen_share`, and the `systems_*` tools take a `CustomScoreConfig` dict (weighted metric groups → weighted metrics, plus camelCase scoring parameters `winsorizePercentile`/`missingDataPercentile`/`normalizeGroupZScores`/`includeDuplicatesInScoring` and a nested `filters` block); see the README example. `normalize_config()` reshapes loose inputs (snake_case, legacy `winsorize`/`zScore` flags, top-level filters) onto this contract before the request is sent.
 
 ## Testing
 

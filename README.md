@@ -245,11 +245,16 @@ account.
 `score_compute`, `screen_share`, and the `systems_*` tools accept a
 `CustomScoreConfig` object describing how to weight financial metrics. Its shape
 mirrors the score builder in the web dashboard: weighted metric **groups**, each
-containing weighted **metrics**, plus statistical options. A minimal example:
+containing weighted **metrics**, plus scoring parameters and an optional nested
+`filters` block. A minimal example:
 
 ```json
 {
   "name": "My quality screen",
+  "winsorizePercentile": 5,
+  "missingDataPercentile": 0.25,
+  "normalizeGroupZScores": false,
+  "includeDuplicatesInScoring": false,
   "groups": [
     {
       "id": "returns",
@@ -269,12 +274,16 @@ containing weighted **metrics**, plus statistical options. A minimal example:
       ]
     }
   ],
-  "winsorize": true,
-  "zScore": true
+  "filters": { "countries": ["Italy"], "min_market_cap": 1 }
 }
 ```
 
-Use `filters_list` to discover valid filter values, and build a config
+Scoring parameters use camelCase: `winsorizePercentile` (1-10), `missingDataPercentile`
+(0.1-0.5), `normalizeGroupZScores` and `includeDuplicatesInScoring` (booleans). Universe
+filters go inside the nested `filters` block (market caps in **billions USD**). Loose
+inputs — snake_case keys, the legacy `winsorize`/`zScore` flags, or filter keys placed at
+the top level — are normalized to this shape automatically, but emitting it directly is
+preferred. Use `filters_list` to discover valid filter values, and build a config
 interactively in the dashboard if you want a starting point to copy.
 
 ---

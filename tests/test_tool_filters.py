@@ -33,6 +33,20 @@ class _RecordingClient:
         self.calls.append({"path": path, "params": params, "json": json})
         return self.response
 
+    def put(self, path: str, params: Optional[dict] = None, json: Optional[dict] = None) -> Any:
+        """Record a PUT call and return the canned response.
+
+        Args:
+            path: Request path.
+            params: Query-string parameters.
+            json: JSON request body.
+
+        Returns:
+            The canned response supplied at construction time.
+        """
+        self.calls.append({"path": path, "params": params, "json": json})
+        return self.response
+
 
 @pytest.fixture
 def patch_guard(monkeypatch: pytest.MonkeyPatch):
@@ -119,11 +133,18 @@ def test_screen_share_builds_full_url(monkeypatch: pytest.MonkeyPatch, patch_gua
 
 
 def test_screen_share_posts_config(patch_guard) -> None:
-    """``screen_share`` posts the config to the public screens endpoint."""
+    """``screen_share`` posts the normalized config to the public screens endpoint."""
     client = patch_guard({"slug": "AbC1234"})
     server.screen_share(config={"name": "My screen", "groups": []})
     assert client.calls[0]["path"] == "/v1/screens"
-    assert client.calls[0]["json"] == {"config": {"name": "My screen", "groups": []}}
+    posted = client.calls[0]["json"]["config"]
+    assert posted["name"] == "My screen"
+    assert posted["groups"] == []
+    # Normalization fills the canonical camelCase parameters with their defaults.
+    assert posted["winsorizePercentile"] == 5
+    assert posted["missingDataPercentile"] == 0.25
+    assert posted["normalizeGroupZScores"] is False
+    assert posted["includeDuplicatesInScoring"] is False
 
 
 def test_screen_share_passes_through_on_missing_slug(patch_guard) -> None:
@@ -131,3 +152,31 @@ def test_screen_share_passes_through_on_missing_slug(patch_guard) -> None:
     raw = {"error": "something went wrong"}
     patch_guard(raw)
     assert server.screen_share(config={"name": "x"}) == raw
+
+
+def test_screen_share_normalizes_legacy_config(patch_guard) -> None:
+    """A legacy/loose config is normalized to camelCase params + nested filters before POST."""
+    client = patch_guard({"slug": "AbC1234"})
+    server.screen_share(config={
+        "name": "Legacy", "groups": [], "winsorize": True, "zScore": True,
+        "countries": ["Italy"], "min_market_cap": 1,
+    })
+    posted = client.calls[0]["json"]["config"]
+    assert posted["winsorizePercentile"] == 5
+    assert posted["normalizeGroupZScores"] is True
+    assert posted["filters"] == {"countries": ["Italy"], "min_market_cap": 1}
+    assert "winsorize" not in posted and "zScore" not in posted and "countries" not in posted
+
+
+def test_systems_create_normalizes_config(patch_guard) -> None:
+    """``systems_create`` normalizes the config before posting it."""
+    client = patch_guard({"id": 1})
+    server.systems_create(name="Sys", config={"name": "Sys", "groups": [], "zScore": True})
+    assert client.calls[0]["json"]["config"]["normalizeGroupZScores"] is True
+
+
+def test_systems_update_omits_config_when_unset(patch_guard) -> None:
+    """``systems_update`` without a config must not send a ``config`` key."""
+    client = patch_guard({"id": 1})
+    server.systems_update(system_id=1, name="Renamed")
+    assert "config" not in client.calls[0]["json"]

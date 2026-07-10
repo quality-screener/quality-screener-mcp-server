@@ -236,6 +236,84 @@ def _filters(
     })
 
 
+# Filter keys that belong inside a config's nested ``filters`` block. Used to fold
+# filters accidentally placed at the top level into ``filters`` during normalization.
+_CONFIG_FILTER_KEYS = (
+    "sectors", "industries", "regions", "countries", "currencies",
+    "exchanges", "min_market_cap", "max_market_cap", "min_score", "max_score", "ticker",
+)
+
+
+def _first_present(d: dict[str, Any], *keys: str) -> Any:
+    """Return the value of the first key present with a non-null value, else ``None``."""
+    for key in keys:
+        if d.get(key) is not None:
+            return d[key]
+    return None
+
+
+def _winsorize_percentile(raw: Any) -> int:
+    """Coerce a loose/legacy winsorize value to a 1-10 percentile (default 5).
+
+    Accepts the canonical integer percentile, or the legacy ``winsorize: true``
+    boolean flag (which just means "apply winsorization" → default percentile).
+    """
+    if isinstance(raw, bool):  # legacy boolean flag — no percentile encoded
+        return 5
+    if isinstance(raw, (int, float)) and 1 <= raw <= 10:
+        return int(raw)
+    return 5
+
+
+def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Reshape a loose CustomScoreConfig dict onto the canonical backend contract.
+
+    The score builder in the web app — and the backend that renders a shared screen —
+    expect camelCase scoring parameters plus a nested ``filters`` block. Callers
+    (notably an LLM) may instead emit snake_case keys, the legacy
+    ``winsorize``/``zScore`` boolean flags, or filter keys at the top level. This maps
+    any such input onto the canonical shape so shared screens and saved systems always
+    render. ``groups`` pass through unchanged; the backend validates their content and
+    rejects a genuinely malformed config with a 422.
+
+    Args:
+        config: The caller-supplied configuration (possibly loosely shaped).
+
+    Returns:
+        A canonical CustomScoreConfig dict: camelCase parameters, nested ``filters``.
+    """
+    if not isinstance(config, dict):
+        return config
+
+    missing = _first_present(config, "missingDataPercentile", "missing_data_percentile")
+    normalized: dict[str, Any] = {
+        "name": config.get("name") or "Custom Screen",
+        "winsorizePercentile": _winsorize_percentile(
+            _first_present(config, "winsorizePercentile", "winsorize_percentile", "winsorize")
+        ),
+        "missingDataPercentile": missing if missing is not None else 0.25,
+        "normalizeGroupZScores": bool(
+            _first_present(config, "normalizeGroupZScores", "normalize_group_z_scores", "zScore", "z_score")
+        ),
+        "includeDuplicatesInScoring": bool(
+            _first_present(config, "includeDuplicatesInScoring", "include_duplicates_in_scoring")
+        ),
+    }
+    if "groups" in config:
+        normalized["groups"] = config["groups"]
+
+    # Fold filters — nested under ``filters`` or scattered at the top level — into a
+    # single nested block, preferring an explicit nested value on any conflict.
+    filters: dict[str, Any] = dict(config.get("filters") or {})
+    for key in _CONFIG_FILTER_KEYS:
+        if key in config and key not in filters:
+            filters[key] = config[key]
+    if filters:
+        normalized["filters"] = filters
+
+    return normalized
+
+
 @mcp.tool(annotations=_readonly("List scored tickers"))
 def scores_list(
     ticker: Optional[str] = None,
@@ -346,12 +424,17 @@ def score_compute(
 ) -> dict:
     """Compute custom scores from a CustomScoreConfig object, restricted to a filtered universe.
 
+    The ``config`` is a CustomScoreConfig: weighted metric ``groups`` (each with weighted
+    ``metrics``) plus scoring parameters ``winsorizePercentile`` (1-10), ``missingDataPercentile``
+    (0.1-0.5), ``normalizeGroupZScores`` and ``includeDuplicatesInScoring`` (booleans). Loose
+    inputs (snake_case keys, legacy ``winsorize``/``zScore`` flags) are normalized automatically.
+
     The list filters (``sectors``, ``industries``, ``countries``, ``currencies``,
     ``exchanges``) narrow the universe the custom score is computed over; each uses
     OR logic within itself and AND logic across filters. Market caps are in USD.
     """
     body = {
-        "score_request": {"config": config},
+        "score_request": {"config": normalize_config(config)},
         "filters": _filters(
             sectors=sectors,
             industries=industries,
@@ -388,8 +471,12 @@ def screen_share(config: dict) -> dict:
     instead of creating a duplicate.
 
     Args:
-        config: The complete CustomScoreConfig to share (metric groups, weights,
-            filters, and parameters), as produced by ``score_compute``/``systems_*``.
+        config: The complete CustomScoreConfig to share — weighted metric ``groups``,
+            scoring parameters (``winsorizePercentile``, ``missingDataPercentile``,
+            ``normalizeGroupZScores``, ``includeDuplicatesInScoring``), and an optional
+            nested ``filters`` block. Loose inputs (snake_case keys, legacy
+            ``winsorize``/``zScore`` flags, or top-level filter keys) are normalized to
+            this shape so the shared link always renders.
 
     Returns:
         dict with ``url`` (the shareable link to copy-paste), ``slug`` (the short
@@ -397,7 +484,7 @@ def screen_share(config: dict) -> dict:
         screen already existed), and ``view_count``.
     """
     def call(c: ApiClient) -> dict:
-        resp = c.post("/v1/screens", json={"config": config})
+        resp = c.post("/v1/screens", json={"config": normalize_config(config)})
         slug = resp.get("slug") if isinstance(resp, dict) else None
         if not slug:
             return resp
@@ -505,7 +592,7 @@ def systems_show(system_id: int) -> dict:
 )
 def systems_create(name: str, config: dict, description: Optional[str] = None) -> dict:
     """Create a saved scoring system from a config object."""
-    return _guard(lambda c: c.post("/v1/user/scores", json=_clean({"name": name, "description": description, "config": config})))
+    return _guard(lambda c: c.post("/v1/user/scores", json=_clean({"name": name, "description": description, "config": normalize_config(config)})))
 
 
 @mcp.tool(
@@ -524,7 +611,8 @@ def systems_update(
     description: Optional[str] = None,
 ) -> dict:
     """Update a saved scoring system."""
-    return _guard(lambda c: c.put(f"/v1/user/scores/{system_id}", json=_clean({"name": name, "description": description, "config": config})))
+    normalized = normalize_config(config) if config is not None else None
+    return _guard(lambda c: c.put(f"/v1/user/scores/{system_id}", json=_clean({"name": name, "description": description, "config": normalized})))
 
 
 @mcp.tool(

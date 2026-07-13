@@ -239,9 +239,20 @@ def _filters(
 # Filter keys that belong inside a config's nested ``filters`` block. Used to fold
 # filters accidentally placed at the top level into ``filters`` during normalization.
 _CONFIG_FILTER_KEYS = (
-    "sectors", "industries", "regions", "countries", "currencies",
-    "exchanges", "min_market_cap", "max_market_cap", "min_score", "max_score", "ticker",
+    "sectors", "industries", "regions", "countries", "currencies", "exchanges",
+    "min_market_cap", "max_market_cap", "min_score", "max_score", "ticker", "tickers",
 )
+
+# The tools expose market caps in USD (``min_market_cap_usd``), but a config's ``filters``
+# block stores them in BILLIONS — the unit the web score builder reads and the backend
+# persists. So these variants must be rescaled onto the canonical key, not merely renamed:
+# the backend ignores unrecognized filter keys, silently widening the screen back to the
+# full universe.
+_USD_MARKET_CAP_KEYS = {
+    "min_market_cap_usd": "min_market_cap",
+    "max_market_cap_usd": "max_market_cap",
+}
+_USD_PER_BILLION = 1_000_000_000
 
 
 def _first_present(d: dict[str, Any], *keys: str) -> Any:
@@ -276,6 +287,10 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     render. ``groups`` pass through unchanged; the backend validates their content and
     rejects a genuinely malformed config with a 422.
 
+    Market caps are the one filter whose unit differs between the tools (USD) and a
+    config's ``filters`` block (billions), so ``min_market_cap_usd``/``max_market_cap_usd``
+    are rescaled onto ``min_market_cap``/``max_market_cap`` rather than copied across.
+
     Args:
         config: The caller-supplied configuration (possibly loosely shaped).
 
@@ -308,6 +323,25 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     for key in _CONFIG_FILTER_KEYS:
         if key in config and key not in filters:
             filters[key] = config[key]
+
+    # Ticker symbols are canonically uppercase everywhere else (the API matches on
+    # UPPER(ticker), the web builder upper-cases on input), so a shared screen should
+    # render them that way too.
+    if isinstance(filters.get("tickers"), list):
+        filters["tickers"] = [str(t).strip().upper() for t in filters["tickers"] if str(t).strip()]
+
+    # Fold the USD-denominated market-cap variants onto the canonical billions key,
+    # wherever the caller put them. An explicit canonical value always wins.
+    for usd_key, canonical_key in _USD_MARKET_CAP_KEYS.items():
+        usd_value = _first_present(filters, usd_key)
+        if usd_value is None:
+            usd_value = _first_present(config, usd_key)
+        filters.pop(usd_key, None)
+        if filters.get(canonical_key) is not None:
+            continue
+        if isinstance(usd_value, (int, float)) and not isinstance(usd_value, bool):
+            filters[canonical_key] = usd_value / _USD_PER_BILLION
+
     if filters:
         normalized["filters"] = filters
 

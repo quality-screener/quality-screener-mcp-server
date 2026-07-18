@@ -32,6 +32,8 @@ same data they see in the web dashboard.
 - [Connecting an MCP client](#connecting-an-mcp-client)
 - [Deployment](#deployment)
 - [Development](#development)
+- [Privacy Policy](#privacy-policy)
+- [Support](#support)
 - [License](#license)
 
 ---
@@ -372,6 +374,43 @@ The codebase is small and self-contained:
 | `qscreener_mcp/client.py` | Minimal httpx client that attaches the bearer token |
 | `qscreener_mcp/oauth.py` | MCP OAuth 2.0 provider (token validation, browser flow) |
 | `tests/` | pytest suite (token resolution, filter forwarding, share-link building) |
+
+---
+
+## Privacy Policy
+
+The full privacy policy is published at **[PRIVACY.md](PRIVACY.md)**
+(<https://github.com/quality-screener/quality-screener-mcp-server/blob/main/PRIVACY.md>).
+
+In short:
+
+- The only personal data retained is your **email address**, which identifies
+  your account. Username and organization are optional profile fields.
+- The MCP server is a **stateless proxy** — it holds no database and writes no
+  personal data to storage of its own. Each request is forwarded to the Quality
+  Screener API using *your* access token, never a shared account.
+- Your data is **not sold**, not used for advertising, and not used to train
+  machine-learning models.
+- Operational logs reference accounts by a pseudonymous user ID, not by email.
+- Account data is deleted when you delete your account.
+
+See the policy for retention periods, third-party recipients, international
+transfers, and your GDPR rights.
+
+---
+
+## Support
+
+| Channel | Use it for |
+| --- | --- |
+| **info@qualityscreener.io** | Support requests, security reports, privacy and data-subject requests |
+| [GitHub Issues](https://github.com/quality-screener/quality-screener-mcp-server/issues) | Bug reports and feature requests |
+
+This README is the canonical documentation for the MCP server:
+<https://github.com/quality-screener/quality-screener-mcp-server>
+
+Please report suspected security vulnerabilities privately by email rather than
+opening a public issue.
 
 ---
 

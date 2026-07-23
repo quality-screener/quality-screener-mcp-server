@@ -209,6 +209,38 @@ def _clean(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
 
+_DESCRIPTION_LIMIT = 200
+
+
+def _slim_score_rows(resp: Any, full_rows: bool = False) -> Any:
+    """Shrink score-list responses for MCP consumption (payload shaping, not business logic).
+
+    The backend embeds each keeper's duplicate cross-listings as FULL score rows (all ~126
+    metric fields plus a 1-2 KB ``description`` each) to power the frontend's expandable-rows
+    feature. Measured on a 40-ticker ``scores_for_tickers`` call this is ~74% of a ~690 KB
+    payload — enough to blow MCP client limits and slow batch requests to timeout. LLM
+    consumers only need to know which duplicate tickers exist, so by default:
+
+      * ``duplicates`` collapses from a list of full rows to a list of ticker strings, and
+      * ``description`` is truncated to the first ``_DESCRIPTION_LIMIT`` characters.
+
+    Error dicts and non-list payloads pass through untouched. Pass ``full_rows=True`` to get
+    the unmodified backend response.
+    """
+    if full_rows or not isinstance(resp, dict) or not isinstance(resp.get("data"), list):
+        return resp
+    for row in resp["data"]:
+        if not isinstance(row, dict):
+            continue
+        dups = row.get("duplicates")
+        if isinstance(dups, list) and dups and isinstance(dups[0], dict):
+            row["duplicates"] = [d.get("ticker") for d in dups if isinstance(d, dict)]
+        desc = row.get("description")
+        if isinstance(desc, str) and len(desc) > _DESCRIPTION_LIMIT:
+            row["description"] = desc[:_DESCRIPTION_LIMIT] + "…"
+    return resp
+
+
 def _filters(
     *,
     ticker: Optional[str] = None,
@@ -331,8 +363,13 @@ def scores_list(
     offset: int = 0,
     limit: int = 50,
     include_duplicates: bool = False,
+    full_rows: bool = False,
 ) -> dict:
-    """List scored tickers with optional filters. Market caps are in USD."""
+    """List scored tickers with optional filters. Market caps are in USD.
+
+    Rows are slimmed for MCP by default (``duplicates`` as ticker strings, ``description``
+    truncated); pass ``full_rows=True`` for the raw backend payload.
+    """
     body = _filters(
         ticker=ticker, sectors=sectors, industries=industries, countries=countries,
         currencies=currencies, exchanges=exchanges, min_score=min_score, max_score=max_score,
@@ -343,7 +380,7 @@ def scores_list(
         "include_duplicates": str(include_duplicates).lower(),
         "sort_by": sort_by, "sort_order": sort_order,
     }
-    return _guard(lambda c: c.post("/v1/scores/list", params=params, json=body))
+    return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/list", params=params, json=body)), full_rows)
 
 
 @mcp.tool(annotations=_readonly("Top tickers by score"))
@@ -360,7 +397,11 @@ def scores_show(ticker: str) -> dict:
 
 
 @mcp.tool(annotations=_readonly("Scores for tickers"))
-def scores_for_tickers(tickers: list[str], scoring_system_id: Optional[int] = None) -> dict:
+def scores_for_tickers(
+    tickers: list[str],
+    scoring_system_id: Optional[int] = None,
+    full_rows: bool = False,
+) -> dict:
     """Return current scores for a specific list of tickers.
 
     Looks up the latest score for each requested ticker under the default quality
@@ -368,9 +409,13 @@ def scores_for_tickers(tickers: list[str], scoring_system_id: Optional[int] = No
     requires being signed in and owning that system). Tickers with no score are
     omitted from the response. Results are sorted by quality score descending.
 
+    Rows are slimmed for MCP by default (``duplicates`` as ticker strings,
+    ``description`` truncated); pass ``full_rows=True`` for the raw backend payload.
+
     Args:
         tickers: Exact ticker symbols to score (e.g. ["AAPL", "MSFT", "ASML.AS"]).
         scoring_system_id: Optional saved scoring-system id; omit for default scoring.
+        full_rows: Return unmodified rows (embedded duplicate rows, full descriptions).
 
     Returns:
         dict: A ScoreListResponse with ``data`` (one row per found ticker),
@@ -380,7 +425,7 @@ def scores_for_tickers(tickers: list[str], scoring_system_id: Optional[int] = No
         "tickers": [t.upper() for t in tickers],
         "scoring_system_id": scoring_system_id,
     })
-    return _guard(lambda c: c.post("/v1/scores/by-tickers", json=body))
+    return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/by-tickers", json=body)), full_rows)
 
 
 @mcp.tool(annotations=_readonly("Score statistics"))

@@ -422,16 +422,32 @@ def score_compute(
     limit: int = 50,
     include_duplicates: bool = False,
 ) -> dict:
-    """Compute custom scores from a CustomScoreConfig object, restricted to a filtered universe.
+    """Compute custom scores from a CustomScoreConfig object over the full scored universe.
 
     The ``config`` is a CustomScoreConfig: weighted metric ``groups`` (each with weighted
     ``metrics``) plus scoring parameters ``winsorizePercentile`` (1-10), ``missingDataPercentile``
     (0.1-0.5), ``normalizeGroupZScores`` and ``includeDuplicatesInScoring`` (booleans). Loose
     inputs (snake_case keys, legacy ``winsorize``/``zScore`` flags) are normalized automatically.
 
-    The list filters (``sectors``, ``industries``, ``countries``, ``currencies``,
-    ``exchanges``) narrow the universe the custom score is computed over; each uses
-    OR logic within itself and AND logic across filters. Market caps are in USD.
+    **Filters select which rows are returned; they do not change any score.** Scores are
+    relative — each company is winsorized and z-scored against a population — and that
+    population is currently the whole universe regardless of the filters below. The list
+    filters (``sectors``, ``industries``, ``countries``, ``currencies``, ``exchanges``) are
+    applied *after* scoring, each using OR logic within itself and AND logic across filters.
+    Market caps are in USD.
+
+    Two parameters *do* affect the scoring population today:
+
+    - ``min_market_cap_usd`` — sets the minimum-cap floor of the scoring population, and
+      also filters the returned rows. ``max_market_cap_usd`` does **not**; it filters rows only.
+    - ``includeDuplicatesInScoring`` (in ``config``) — whether cross-listings join the peer
+      group as independent tickers.
+
+    A nested ``config['filters']`` block is persisted with saved and shared screens
+    (``screen_share``, ``systems_create``/``systems_update``) so a screen can restore its
+    filter selections; it is **not** read by this endpoint and does not define the scoring
+    population. To rank a subset against itself rather than against the world, no parameter
+    exists yet — see quality-screener#194.
     """
     body = {
         "score_request": {"config": normalize_config(config)},

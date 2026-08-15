@@ -279,12 +279,35 @@ containing weighted **metrics**, plus scoring parameters and an optional nested
 ```
 
 Scoring parameters use camelCase: `winsorizePercentile` (1-10), `missingDataPercentile`
-(0.1-0.5), `normalizeGroupZScores` and `includeDuplicatesInScoring` (booleans). Universe
+(0.1-0.5), `normalizeGroupZScores` and `includeDuplicatesInScoring` (booleans). Screen
 filters go inside the nested `filters` block (market caps in **billions USD**). Loose
 inputs — snake_case keys, the legacy `winsorize`/`zScore` flags, or filter keys placed at
 the top level — are normalized to this shape automatically, but emitting it directly is
 preferred. Use `filters_list` to discover valid filter values, and build a config
 interactively in the dashboard if you want a starting point to copy.
+
+### What the nested `filters` block does — and does not do
+
+It is **saved-screen state**. `screen_share` and `systems_create`/`systems_update` persist
+it so a shared screen or saved scoring system restores its filter selections when reopened
+in the dashboard. That is its purpose and it works.
+
+It does **not** define the population your scores are computed against. `score_compute`
+sends the config to the live scoring endpoint, which parses it as `CustomScoreConfig` — a
+model that does not declare `filters` — so the block is ignored there. A config carrying
+`"filters": {"countries": ["Switzerland"]}` returns the full scored universe, not Swiss
+companies.
+
+More generally, **no filter currently narrows the scoring population**, with two
+exceptions: `min_market_cap_usd` (which sets the minimum-cap floor as well as filtering
+rows) and `includeDuplicatesInScoring`. Everything else — sectors, industries, countries,
+currencies, exchanges, `max_market_cap_usd`, tickers, search — selects which already-scored
+rows come back. Scores are identical whether you filter or not.
+
+Ranking a subset against itself (e.g. "best European tech, judged against European tech")
+is not expressible today. The design for an explicit scoring-universe stage is tracked in
+[quality-screener#194](https://github.com/quality-screener/quality-screener/pull/194); this
+documentation will be updated when it lands.
 
 ---
 

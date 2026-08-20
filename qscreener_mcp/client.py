@@ -7,9 +7,10 @@ token as explicit constructor arguments.
 
 from typing import Any, Optional
 
-from qscreener_mcp import __version__
-
 import httpx
+
+from qscreener_mcp import __version__
+from qscreener_mcp.constants import Tool
 
 CLI_TOKEN_HEADER = "X-Stobot-CLI-Token"
 
@@ -40,7 +41,7 @@ class ApiClient:
         api_url: str,
         token: str,
         timeout: float = DEFAULT_TIMEOUT,
-        tool: Optional[str] = None,
+        tool: Optional[Tool] = None,
     ) -> None:
         """Create a client.
 
@@ -48,8 +49,8 @@ class ApiClient:
             api_url: Backend API base URL.
             token: CLI bearer token.
             timeout: Per-request timeout in seconds.
-            tool: Name of the MCP tool making the call, reported to the backend
-                for usage analytics.
+            tool: The MCP tool making the call, reported to the backend for
+                usage analytics.
         """
         self._api_url = api_url.rstrip("/")
         self._token = token
@@ -63,7 +64,9 @@ class ApiClient:
             CLIENT_HEADER: CLIENT_ID,
         }
         if self._tool:
-            headers[CLIENT_OP_HEADER] = self._tool
+            # StrEnum members are strings, but send the value explicitly so the
+            # wire format never depends on the enum's repr.
+            headers[CLIENT_OP_HEADER] = str(self._tool)
         return headers
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:

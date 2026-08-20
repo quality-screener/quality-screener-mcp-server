@@ -118,9 +118,28 @@ OAUTH_FAILURE_HTML = (
 # Filter keys that belong inside a config's nested ``filters`` block. Used to fold
 # filters accidentally placed at the top level into ``filters`` during normalization.
 CONFIG_FILTER_KEYS = (
-    "sectors", "industries", "regions", "countries", "currencies",
-    "exchanges", "min_market_cap", "max_market_cap", "min_score", "max_score", "ticker",
+    "sectors", "industries", "regions", "countries", "currencies", "exchanges",
+    "min_market_cap", "max_market_cap", "min_score", "max_score", "ticker", "tickers",
 )
+
+# The tools expose market caps in USD (``min_market_cap_usd``), but a config's ``filters``
+# block stores them in BILLIONS — the unit the web score builder reads and the backend
+# persists. So these variants must be rescaled onto the canonical key, not merely renamed:
+# the backend ignores unrecognized filter keys, silently widening the screen back to the
+# full universe.
+USD_MARKET_CAP_KEYS = {
+    "min_market_cap_usd": "min_market_cap",
+    "max_market_cap_usd": "max_market_cap",
+}
+USD_PER_BILLION = 1_000_000_000
+
+# ------------------------------------------------------------------ #
+# Response shaping                                                     #
+# ------------------------------------------------------------------ #
+
+# Score-list descriptions are truncated to this many characters before being
+# handed to an LLM, to keep payloads small.
+DESCRIPTION_LIMIT = 200
 
 # ------------------------------------------------------------------ #
 # Tools                                                                #

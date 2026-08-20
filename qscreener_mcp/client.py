@@ -9,24 +9,14 @@ from typing import Any, Optional
 
 import httpx
 
-from qscreener_mcp import __version__
-from qscreener_mcp.constants import Tool
-
-CLI_TOKEN_HEADER = "X-Stobot-CLI-Token"
-
-# Identifies this client to the backend, which cannot otherwise tell MCP traffic
-# apart from the qscreener CLI: both call the same endpoints with the same token
-# header. ``X-Stobot-Client-Op`` names the tool behind the call, so a request to
-# a shared endpoint (scores_show and scores_list both POST /v1/scores/list) is
-# still attributable to the tool the user actually invoked.
-#
-# Both headers are product-analytics metadata only — nothing about authentication
-# or authorization depends on them.
-CLIENT_HEADER = "X-Stobot-Client"
-CLIENT_OP_HEADER = "X-Stobot-Client-Op"
-CLIENT_ID = f"mcp/{__version__}"
-
-DEFAULT_TIMEOUT = 60.0
+from qscreener_mcp.constants import (
+    CLI_TOKEN_HEADER,
+    CLIENT_HEADER,
+    CLIENT_ID,
+    CLIENT_OP_HEADER,
+    DEFAULT_TIMEOUT,
+    Tool,
+)
 
 
 class ApiError(Exception):

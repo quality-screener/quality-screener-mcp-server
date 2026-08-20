@@ -6,14 +6,14 @@ headers are what make MCP usage attributable in product analytics.
 """
 
 from qscreener_mcp import __version__, server
-from qscreener_mcp.client import (
+from qscreener_mcp.client import ApiClient
+from qscreener_mcp.constants import (
     CLI_TOKEN_HEADER,
     CLIENT_HEADER,
     CLIENT_ID,
     CLIENT_OP_HEADER,
-    ApiClient,
+    Tool,
 )
-from qscreener_mcp.constants import Tool
 
 
 def test_headers_identify_the_mcp_client() -> None:

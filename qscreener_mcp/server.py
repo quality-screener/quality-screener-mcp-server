@@ -39,23 +39,49 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 
 from qscreener_mcp.client import ApiClient, ApiError
-from qscreener_mcp.constants import Tool
+from qscreener_mcp.constants import (
+    CLI_TOKEN_HEADER,
+    CONFIG_FILTER_KEYS,
+    CREDENTIALS_FILENAME,
+    DEFAULT_API_URL,
+    DEFAULT_CONFIG_DIR_PARTS,
+    DEFAULT_MCP_HOST,
+    DEFAULT_MCP_PORT,
+    DEFAULT_TRANSPORT,
+    DEFAULT_WEBSITE_URL,
+    ENV_API_URL,
+    ENV_CONFIG_DIR,
+    ENV_MCP_HOST,
+    ENV_MCP_PORT,
+    ENV_MCP_PUBLIC_URL,
+    ENV_MCP_TRANSPORT,
+    ENV_PLATFORM_PORT,
+    ENV_TOKEN,
+    ENV_WEBSITE_URL,
+    NOT_AUTHENTICATED,
+    OAUTH_FAILURE_HTML,
+    Tool,
+)
 from qscreener_mcp.oauth import StobotOAuthProvider, store_auth_code
 
 # ------------------------------------------------------------------ #
 # Configuration — resolved at import time from environment variables  #
 # ------------------------------------------------------------------ #
 
-_API_URL: str = os.environ.get("QSCREENER_API_URL", "http://localhost:8001").rstrip("/")
-_WEBSITE_URL: str = os.environ.get("QSCREENER_WEBSITE_URL", "http://localhost:3001").rstrip("/")
+_API_URL: str = os.environ.get(ENV_API_URL, DEFAULT_API_URL).rstrip("/")
+_WEBSITE_URL: str = os.environ.get(ENV_WEBSITE_URL, DEFAULT_WEBSITE_URL).rstrip("/")
 # Resolve bind host early so FastMCP's constructor sees the real value and does not
 # auto-enable localhost-only DNS rebinding protection when we are binding to 0.0.0.0.
-_MCP_HOST: str = os.environ.get("QSCREENER_MCP_HOST", "0.0.0.0")
+_MCP_HOST: str = os.environ.get(ENV_MCP_HOST, DEFAULT_MCP_HOST)
+
+
+def _port() -> str:
+    """Return the bind port; the platform's PORT wins over the explicit override."""
+    return os.environ.get(ENV_PLATFORM_PORT) or os.environ.get(ENV_MCP_PORT) or DEFAULT_MCP_PORT
 
 
 def _public_url() -> str:
-    port = os.environ.get("PORT") or os.environ.get("QSCREENER_MCP_PORT") or "8080"
-    return os.environ.get("QSCREENER_MCP_PUBLIC_URL", f"http://localhost:{port}").rstrip("/")
+    return os.environ.get(ENV_MCP_PUBLIC_URL, f"http://localhost:{_port()}").rstrip("/")
 
 
 _PUBLIC_URL: str = _public_url()
@@ -85,17 +111,6 @@ mcp = FastMCP(
 # OAuth browser-callback route                                         #
 # ------------------------------------------------------------------ #
 
-_OAUTH_SUCCESS_HTML = (
-    "<html><body style='font-family:sans-serif;text-align:center;margin-top:4rem'>"
-    "<h2>qscreener: you're signed in</h2>"
-    "<p>You can close this tab and return to your AI agent.</p></body></html>"
-)
-_OAUTH_FAILURE_HTML = (
-    "<html><body style='font-family:sans-serif;text-align:center;margin-top:4rem'>"
-    "<h2>qscreener: sign-in failed</h2>"
-    "<p>The login link was invalid or expired. Try connecting again from your AI agent.</p></body></html>"
-)
-
 
 @mcp.custom_route("/oauth/callback", methods=["GET"])
 async def _oauth_callback(request: Request) -> RedirectResponse | HTMLResponse:
@@ -104,11 +119,11 @@ async def _oauth_callback(request: Request) -> RedirectResponse | HTMLResponse:
     token = request.query_params.get("token")
 
     if not state or not token:
-        return HTMLResponse(_OAUTH_FAILURE_HTML, status_code=400)
+        return HTMLResponse(OAUTH_FAILURE_HTML, status_code=400)
 
     redirect_url = store_auth_code(internal_state=state, cli_token=token)
     if redirect_url is None:
-        return HTMLResponse(_OAUTH_FAILURE_HTML, status_code=400)
+        return HTMLResponse(OAUTH_FAILURE_HTML, status_code=400)
 
     return RedirectResponse(redirect_url, status_code=302)
 
@@ -116,16 +131,6 @@ async def _oauth_callback(request: Request) -> RedirectResponse | HTMLResponse:
 # ------------------------------------------------------------------ #
 # Bearer-token helpers                                                 #
 # ------------------------------------------------------------------ #
-
-_CLI_TOKEN_HEADER = "X-Stobot-CLI-Token"
-
-_NOT_AUTHENTICATED = {
-    "error": (
-        "Not authenticated. In HTTP mode the MCP client handles login automatically "
-        "via OAuth — reconnect to trigger the flow. In stdio mode, run "
-        "'qscreener auth login' or set $QSCREENER_TOKEN."
-    )
-}
 
 
 def _bearer_token() -> Optional[str]:
@@ -137,7 +142,7 @@ def _bearer_token() -> Optional[str]:
     # 1. Active HTTP request (set by FastMCP auth middleware or sent manually)
     try:
         headers = mcp.get_context().request_context.request.headers
-        if t := headers.get(_CLI_TOKEN_HEADER):
+        if t := headers.get(CLI_TOKEN_HEADER):
             return t.strip() or None
         if auth := headers.get("authorization", ""):
             if auth.lower().startswith("bearer "):
@@ -146,13 +151,13 @@ def _bearer_token() -> Optional[str]:
         pass
 
     # 2. Env var override (convenient for CI / local dev)
-    if t := os.environ.get("QSCREENER_TOKEN"):
+    if t := os.environ.get(ENV_TOKEN):
         return t
 
     # 3. Credentials file written by `qscreener auth login`
-    config_dir = Path(os.environ.get("QSCREENER_CONFIG_DIR", Path.home() / ".config" / "qscreener"))
+    config_dir = Path(os.environ.get(ENV_CONFIG_DIR, Path.home().joinpath(*DEFAULT_CONFIG_DIR_PARTS)))
     try:
-        return json.loads((config_dir / "credentials.json").read_text()).get("token")
+        return json.loads((config_dir / CREDENTIALS_FILENAME).read_text()).get("token")
     except Exception:  # noqa: BLE001
         return None
 
@@ -168,7 +173,7 @@ def _guard(fn: Callable[[ApiClient], Any], *, tool: Tool) -> Any:
     """
     token = _bearer_token()
     if not token:
-        return dict(_NOT_AUTHENTICATED)
+        return dict(NOT_AUTHENTICATED)
     client = ApiClient(api_url=_API_URL, token=token, tool=tool)
     try:
         result = fn(client)
@@ -276,25 +281,6 @@ def _filters(
     })
 
 
-# Filter keys that belong inside a config's nested ``filters`` block. Used to fold
-# filters accidentally placed at the top level into ``filters`` during normalization.
-_CONFIG_FILTER_KEYS = (
-    "sectors", "industries", "regions", "countries", "currencies", "exchanges",
-    "min_market_cap", "max_market_cap", "min_score", "max_score", "ticker", "tickers",
-)
-
-# The tools expose market caps in USD (``min_market_cap_usd``), but a config's ``filters``
-# block stores them in BILLIONS — the unit the web score builder reads and the backend
-# persists. So these variants must be rescaled onto the canonical key, not merely renamed:
-# the backend ignores unrecognized filter keys, silently widening the screen back to the
-# full universe.
-_USD_MARKET_CAP_KEYS = {
-    "min_market_cap_usd": "min_market_cap",
-    "max_market_cap_usd": "max_market_cap",
-}
-_USD_PER_BILLION = 1_000_000_000
-
-
 def _first_present(d: dict[str, Any], *keys: str) -> Any:
     """Return the value of the first key present with a non-null value, else ``None``."""
     for key in keys:
@@ -360,7 +346,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     # Fold filters — nested under ``filters`` or scattered at the top level — into a
     # single nested block, preferring an explicit nested value on any conflict.
     filters: dict[str, Any] = dict(config.get("filters") or {})
-    for key in _CONFIG_FILTER_KEYS:
+    for key in CONFIG_FILTER_KEYS:
         if key in config and key not in filters:
             filters[key] = config[key]
 
@@ -758,8 +744,8 @@ def main() -> None:
     (default ``0.0.0.0``) and ``$PORT`` / ``QSCREENER_MCP_PORT``
     (default ``8080``), serving MCP at ``/mcp`` and OAuth at standard paths.
     """
-    transport = os.environ.get("QSCREENER_MCP_TRANSPORT", "stdio").strip().lower()
-    if transport == "stdio":
+    transport = os.environ.get(ENV_MCP_TRANSPORT, DEFAULT_TRANSPORT).strip().lower()
+    if transport == DEFAULT_TRANSPORT:
         mcp.run()
         return
     if transport not in {"streamable-http", "sse"}:
@@ -767,7 +753,7 @@ def main() -> None:
             f"Unsupported QSCREENER_MCP_TRANSPORT {transport!r}; "
             "use 'stdio', 'streamable-http', or 'sse'."
         )
-    mcp.settings.port = int(os.environ.get("PORT") or os.environ.get("QSCREENER_MCP_PORT") or "8080")
+    mcp.settings.port = int(_port())
     mcp.run(transport=transport)
 
 

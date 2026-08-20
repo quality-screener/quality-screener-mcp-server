@@ -43,13 +43,19 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 
-_AUTH_CODE_TTL = 600  # seconds — codes are exchanged immediately; 10 min is generous
+from qscreener_mcp.constants import (
+    AUTH_CODE_TTL,
+    CLI_TOKEN_HEADER,
+    DEFAULT_CONFIG_DIR_PARTS,
+    ENV_CONFIG_DIR,
+    MCP_CLIENTS_FILENAME,
+)
 
 
 def _clients_file() -> Path:
-    config_dir = Path(os.environ.get("QSCREENER_CONFIG_DIR", Path.home() / ".config" / "qscreener"))
+    config_dir = Path(os.environ.get(ENV_CONFIG_DIR, Path.home().joinpath(*DEFAULT_CONFIG_DIR_PARTS)))
     config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir / "mcp_clients.json"
+    return config_dir / MCP_CLIENTS_FILENAME
 
 
 def _load_clients() -> dict[str, OAuthClientInformationFull]:
@@ -169,7 +175,7 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
             async with httpx.AsyncClient(timeout=10.0) as http:
                 response = await http.get(
                     f"{self._api_url}/v1/cli/auth/whoami",
-                    headers={"X-Stobot-CLI-Token": token},
+                    headers={CLI_TOKEN_HEADER: token},
                 )
             if response.status_code != 200:
                 _log.warning(
@@ -196,7 +202,7 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
             async with httpx.AsyncClient(timeout=10.0) as http:
                 await http.post(
                     f"{self._api_url}/v1/cli/auth/logout",
-                    headers={"X-Stobot-CLI-Token": token.token},
+                    headers={CLI_TOKEN_HEADER: token.token},
                 )
         except Exception:  # noqa: BLE001
             pass
@@ -226,6 +232,6 @@ def store_auth_code(internal_state: str, cli_token: str) -> Optional[str]:
         "redirect_uri": pending["redirect_uri"],
         "code_challenge": pending["code_challenge"],
         "scopes": pending["scopes"],
-        "expires_at": time.time() + _AUTH_CODE_TTL,
+        "expires_at": time.time() + AUTH_CODE_TTL,
     }
     return construct_redirect_uri(pending["redirect_uri"], code=code, state=pending["oauth_state"])

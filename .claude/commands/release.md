@@ -1,72 +1,62 @@
 ---
-description: Cut a new release — branch from main, merge develop, bump versions, tag, open a release PR, and publish a GitHub release
+description: Cut a new release — bump the version on main, tag it, and publish a GitHub release
 argument-hint: "[patch|minor|major]"
 allowed-tools: Bash, Read, Edit
 ---
 
-Cut a new release for stobot. The bump type is `$1` (default to `patch` if empty).
+Cut a new release for `qscreener-mcp`. The bump type is `$1` (default to `patch` if empty).
 
 ## Critical rules
 
-- **Backend and frontend versions MUST always stay in sync** with each other and with the git tag. `backend/pyproject.toml` `version`, `ui/package.json` `version`, and the new tag must all reference the same version number.
-- Git tags use a `v` prefix (e.g. `v0.5.1`); the version fields in the manifest files and the release branch name do NOT (e.g. `0.5.1`, `release/0.5.1`).
-- Never push or publish until the version edits are committed.
-- **A release is the one sanctioned case for branching off `main` and targeting `main` in a PR.** This overrides the usual "branch off `develop`" rule. The release branch is cut from `main`; `develop` is then merged into it; the PR targets `main`.
+- **`pyproject.toml` and `server.json` versions MUST stay in sync** with each other and with the git tag. The package exposes `__version__` via `importlib.metadata` (see `qscreener_mcp/__init__.py`), and it is sent to the backend as `CLIENT_ID = f"mcp/{__version__}"` — a stale `pyproject.toml` version silently corrupts usage analytics.
+- Git tags use a `v` prefix (e.g. `v0.2.0`); the `version` fields in `pyproject.toml` and `server.json` do NOT (e.g. `0.2.0`).
+- Releases are cut **directly on `main`** — this repo has no `develop` branch and `main` is not protected. Do not open a release PR.
+- Never push or tag until the version edits are committed.
 
 ## Steps
 
-1. **Sync `main` and cut the release branch.** (Do this FIRST, before any edits.)
+1. **Sync `main`.** (Do this FIRST, before any edits.)
    - `git fetch origin --tags`
-   - **Determine the new version:**
-     - Run `git tag --sort=-v:refname | head -5` to find the latest tag.
-     - Parse the latest semver tag (strip the `v` prefix).
-     - Bump according to `$1`:
-       - `patch` (default) → `X.Y.(Z+1)`
-       - `minor` → `X.(Y+1).0`
-       - `major` → `(X+1).0.0`
-     - Call the new version `NEW` (no `v`) and the tag `vNEW`.
-   - Check out an up-to-date `main`: `git switch main && git pull --ff-only origin main`.
-   - Create the release branch off `main`: `git switch -c release/NEW`.
+   - `git switch main && git pull --ff-only origin main`
+   - Confirm the working tree is clean (`git status --porcelain` returns nothing). Abort and tell the user if it is not.
 
-2. **Merge `develop` into the release branch.**
-   - `git merge origin/develop`
-   - If there are conflicts, resolve them before continuing. Do not proceed with an unfinished merge.
+2. **Determine the new version.**
+   - Run `git tag --sort=-v:refname | head -5` to find the latest tag.
+   - If tags exist: parse the latest semver tag (strip the `v` prefix) and bump according to `$1`:
+     - `patch` (default) → `X.Y.(Z+1)`
+     - `minor` → `X.(Y+1).0`
+     - `major` → `(X+1).0.0`
+   - If **no tags exist** (first release): do not bump. Use the version already in `pyproject.toml` as-is, and say so in the final report.
+   - Call the new version `NEW` (no `v`) and the tag `vNEW`.
+   - Sanity check that `vNEW` does not already exist: `git rev-parse -q --verify refs/tags/vNEW` must fail.
 
-3. **Update version manifests** to `NEW`:
-   - Edit `version` in `backend/pyproject.toml` (`[project]` section).
-   - Edit `version` in `ui/package.json`.
-   - Confirm both now read exactly `NEW`.
+3. **Update the version manifests** to `NEW`:
+   - Edit `version` in `pyproject.toml` (`[project]` section).
+   - Edit `version` in `server.json` (top level).
+   - Confirm both now read exactly `NEW`: `grep -n '"\?version"\? *[:=]' pyproject.toml server.json`.
+   - Skip this step if the versions already equal `NEW` (first-release case).
 
-4. **Commit the version bump.**
-   - Stage only the two manifest files.
+4. **Verify the release is green.**
+   - `uv sync && uv run pytest`
+   - Do not continue if tests fail — report and stop.
+
+5. **Commit the version bump.**
+   - Stage only `pyproject.toml` and `server.json`.
    - Commit with a Conventional Commit message: `chore(release): vNEW`.
+   - Skip if there is nothing to commit (first-release case).
 
-5. **Tag the release commit.**
+6. **Tag the release commit.**
    - `git tag vNEW`
 
-6. **Push all** (branch + tag).
-   - `git push -u origin release/NEW`
+7. **Push** the branch and the tag.
+   - `git push origin main`
    - `git push origin vNEW`
 
-7. **Gather the changelog** since the previous tag (used for both the PR and the release):
-   - `git log <previous-tag>..HEAD --pretty=format:"%H %s"` to list commits.
-   - For each merge/PR, prefer linking the PR. Resolve the repo slug with `gh repo view --json nameWithOwner -q .nameWithOwner`.
-   - Build a markdown summary grouped by type (Features, Fixes, Chores, etc.). Each entry links either the PR (`#123`) or the commit short SHA.
-
-8. **Open the release PR into `main`:**
-   ```
-   gh pr create --base main --head release/NEW --title "chore(release): vNEW" --body "$(cat <<'EOF'
-   ## What's changed
-
-   <grouped bullet list with PR/commit links>
-
-   <one-paragraph description of the release>
-
-   **Full changelog**: <previous-tag>...vNEW
-   EOF
-   )"
-   ```
-   - **Merge this PR with a merge commit (not squash),** so the `vNEW` tag stays in `main`'s history.
+8. **Gather the changelog** since the previous tag:
+   - `git log <previous-tag>..HEAD --pretty=format:"%H %s"` — or `git log --pretty=format:"%H %s"` for the first release.
+   - Resolve the repo slug with `gh repo view --json nameWithOwner -q .nameWithOwner`.
+   - Since merges here are squashed, most subjects already carry a `(#123)` suffix — link that PR. Otherwise link the commit short SHA.
+   - Build a markdown summary grouped by Conventional Commit type (Features, Fixes, Docs, Chores, …).
 
 9. **Create the GitHub release** from the tag:
    ```
@@ -81,5 +71,6 @@ Cut a new release for stobot. The bump type is `$1` (default to `patch` if empty
    EOF
    )"
    ```
+   - Omit the **Full changelog** line on the first release.
 
-10. **Report** the new version, the tag, the release branch, the PR URL, and the release URL.
+10. **Report** the new version, the tag, the release URL, and remind the user that the MCP registry entry (`server.json`) is published separately with `mcp-publisher` if they want the new version listed.

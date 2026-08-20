@@ -5,11 +5,26 @@ dependency on the ``stobot`` package.  Accepts the API base URL and bearer
 token as explicit constructor arguments.
 """
 
-from typing import Any
+from typing import Any, Optional
+
+from qscreener_mcp import __version__
 
 import httpx
 
 CLI_TOKEN_HEADER = "X-Stobot-CLI-Token"
+
+# Identifies this client to the backend, which cannot otherwise tell MCP traffic
+# apart from the qscreener CLI: both call the same endpoints with the same token
+# header. ``X-Stobot-Client-Op`` names the tool behind the call, so a request to
+# a shared endpoint (scores_show and scores_list both POST /v1/scores/list) is
+# still attributable to the tool the user actually invoked.
+#
+# Both headers are product-analytics metadata only — nothing about authentication
+# or authorization depends on them.
+CLIENT_HEADER = "X-Stobot-Client"
+CLIENT_OP_HEADER = "X-Stobot-Client-Op"
+CLIENT_ID = f"mcp/{__version__}"
+
 DEFAULT_TIMEOUT = 60.0
 
 
@@ -20,13 +35,36 @@ class ApiError(Exception):
 class ApiClient:
     """Thin httpx wrapper that attaches the CLI bearer token to every request."""
 
-    def __init__(self, api_url: str, token: str, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        api_url: str,
+        token: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        tool: Optional[str] = None,
+    ) -> None:
+        """Create a client.
+
+        Args:
+            api_url: Backend API base URL.
+            token: CLI bearer token.
+            timeout: Per-request timeout in seconds.
+            tool: Name of the MCP tool making the call, reported to the backend
+                for usage analytics.
+        """
         self._api_url = api_url.rstrip("/")
         self._token = token
         self._timeout = timeout
+        self._tool = tool
 
     def _headers(self) -> dict[str, str]:
-        return {"Accept": "application/json", CLI_TOKEN_HEADER: self._token}
+        headers = {
+            "Accept": "application/json",
+            CLI_TOKEN_HEADER: self._token,
+            CLIENT_HEADER: CLIENT_ID,
+        }
+        if self._tool:
+            headers[CLIENT_OP_HEADER] = self._tool
+        return headers
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         """Send a request and return the decoded JSON body (or ``None`` for empty responses).

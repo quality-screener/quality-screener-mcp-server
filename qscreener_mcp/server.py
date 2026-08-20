@@ -39,6 +39,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 
 from qscreener_mcp.client import ApiClient, ApiError
+from qscreener_mcp.constants import Tool
 from qscreener_mcp.oauth import StobotOAuthProvider, store_auth_code
 
 # ------------------------------------------------------------------ #
@@ -156,14 +157,14 @@ def _bearer_token() -> Optional[str]:
         return None
 
 
-def _guard(fn: Callable[[ApiClient], Any], *, tool: str) -> Any:
+def _guard(fn: Callable[[ApiClient], Any], *, tool: Tool) -> Any:
     """Run ``fn`` with an authenticated ApiClient; return an error dict on failure.
 
     Args:
         fn: Callable invoked with the client.
-        tool: Name of the calling tool, reported to the backend for usage
-            analytics. Passed explicitly because every call site hands ``fn`` in
-            as an anonymous lambda, so the name cannot be inferred from it.
+        tool: The calling tool, reported to the backend for usage analytics.
+            Passed explicitly because every call site hands ``fn`` in as an
+            anonymous lambda, so the name cannot be inferred from it.
     """
     token = _bearer_token()
     if not token:
@@ -197,19 +198,19 @@ def auth_status() -> dict:
     """Report whether a CLI token is present and which user it authenticates as."""
     if not _bearer_token():
         return {"signed_in": False, "hint": "Connect via an MCP client to trigger OAuth login."}
-    return _guard(lambda c: c.get("/v1/cli/auth/whoami"), tool="auth_status")
+    return _guard(lambda c: c.get("/v1/cli/auth/whoami"), tool=Tool.AUTH_STATUS)
 
 
 @mcp.tool(annotations=_readonly("API health"))
 def health() -> dict:
     """Check API and database health."""
-    return _guard(lambda c: c.get("/health"), tool="health")
+    return _guard(lambda c: c.get("/health"), tool=Tool.HEALTH)
 
 
 @mcp.tool(annotations=_readonly("Account profile"))
 def account_profile() -> dict:
     """Return the signed-in user's profile (email, username, organization)."""
-    return _guard(lambda c: c.get("/v1/auth/profile"), tool="account_profile")
+    return _guard(lambda c: c.get("/v1/auth/profile"), tool=Tool.ACCOUNT_PROFILE)
 
 
 def _clean(d: dict[str, Any]) -> dict[str, Any]:
@@ -421,20 +422,20 @@ def scores_list(
         "include_duplicates": str(include_duplicates).lower(),
         "sort_by": sort_by, "sort_order": sort_order,
     }
-    return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/list", params=params, json=body), tool="scores_list"), full_rows)
+    return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/list", params=params, json=body), tool=Tool.SCORES_LIST), full_rows)
 
 
 @mcp.tool(annotations=_readonly("Top tickers by score"))
 def scores_top(limit: int = 20) -> dict:
     """Return the top tickers by quality score as a {ticker: score} map."""
-    return _guard(lambda c: c.get("/v1/scores/", params={"limit": limit}), tool="scores_top")
+    return _guard(lambda c: c.get("/v1/scores/", params={"limit": limit}), tool=Tool.SCORES_TOP)
 
 
 @mcp.tool(annotations=_readonly("Show ticker score"))
 def scores_show(ticker: str) -> dict:
     """Return the score row(s) for a single ticker."""
     body = _filters(ticker=ticker.upper())
-    return _guard(lambda c: c.post("/v1/scores/list", params={"limit": 5, "include_duplicates": "true"}, json=body), tool="scores_show")
+    return _guard(lambda c: c.post("/v1/scores/list", params={"limit": 5, "include_duplicates": "true"}, json=body), tool=Tool.SCORES_SHOW)
 
 
 @mcp.tool(annotations=_readonly("Scores for tickers"))
@@ -466,7 +467,7 @@ def scores_for_tickers(
         "tickers": [t.upper() for t in tickers],
         "scoring_system_id": scoring_system_id,
     })
-    return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/by-tickers", json=body), tool="scores_for_tickers"), full_rows)
+    return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/by-tickers", json=body), tool=Tool.SCORES_FOR_TICKERS), full_rows)
 
 
 @mcp.tool(annotations=_readonly("Score statistics"))
@@ -482,14 +483,14 @@ def scores_statistics(
         sectors=sectors, min_score=min_score, max_score=max_score,
         min_market_cap=min_market_cap_usd, max_market_cap=max_market_cap_usd,
     )
-    return _guard(lambda c: c.post("/v1/scores/statistics", json=body), tool="scores_statistics")
+    return _guard(lambda c: c.post("/v1/scores/statistics", json=body), tool=Tool.SCORES_STATISTICS)
 
 
 @mcp.tool(annotations=_readonly("Aggregated market cap"))
 def scores_market_cap(sectors: Optional[list[str]] = None, min_score: Optional[float] = None) -> dict:
     """Return aggregated total market cap (USD) for a filtered universe."""
     body = _filters(sectors=sectors, min_score=min_score)
-    return _guard(lambda c: c.post("/v1/scores/total-market-cap", json=body), tool="scores_market_cap")
+    return _guard(lambda c: c.post("/v1/scores/total-market-cap", json=body), tool=Tool.SCORES_MARKET_CAP)
 
 
 @mcp.tool(annotations=_readonly("Compute custom score"))
@@ -552,7 +553,7 @@ def score_compute(
         "include_duplicates": str(include_duplicates).lower(),
         "sort_by": sort_by, "sort_order": sort_order,
     }
-    return _guard(lambda c: c.post("/v1/scores/custom", params=params, json=body), tool="score_compute")
+    return _guard(lambda c: c.post("/v1/scores/custom", params=params, json=body), tool=Tool.SCORE_COMPUTE)
 
 
 @mcp.tool(
@@ -596,13 +597,13 @@ def screen_share(config: dict) -> dict:
             "created": resp.get("created", False),
             "view_count": resp.get("view_count", 0),
         }
-    return _guard(call, tool="screen_share")
+    return _guard(call, tool=Tool.SCREEN_SHARE)
 
 
 @mcp.tool(annotations=_readonly("List filter values"))
 def filters_list() -> dict:
     """Return available filter values (sectors, industries, countries, currencies, exchanges)."""
-    return _guard(lambda c: c.get("/v1/filters/values"), tool="filters_list")
+    return _guard(lambda c: c.get("/v1/filters/values"), tool=Tool.FILTERS_LIST)
 
 
 @mcp.tool(annotations=_readonly("List tickers"))
@@ -614,7 +615,7 @@ def tickers_list(limit: Optional[int] = None) -> dict:
         if limit is not None:
             tickers = tickers[:limit]
         return {"tickers": tickers, "count": len(tickers)}
-    return _guard(call, tool="tickers_list")
+    return _guard(call, tool=Tool.TICKERS_LIST)
 
 
 @mcp.tool(annotations=_readonly("Search tickers"))
@@ -626,7 +627,7 @@ def tickers_search(query: str) -> dict:
         needle = query.upper()
         matches = [t for t in tickers if needle in t.upper()]
         return {"tickers": matches, "count": len(matches)}
-    return _guard(call, tool="tickers_search")
+    return _guard(call, tool=Tool.TICKERS_SEARCH)
 
 
 @mcp.tool(annotations=_readonly("Ticker score history"))
@@ -638,7 +639,7 @@ def history_ticker(
 ) -> dict:
     """Return score history for a single ticker (dates: YYYY-MM-DD)."""
     params = _clean({"start_date": start, "end_date": end, "scoring_system_id": scoring_system_id})
-    return _guard(lambda c: c.get(f"/v1/scores/history/{ticker.upper()}", params=params), tool="history_ticker")
+    return _guard(lambda c: c.get(f"/v1/scores/history/{ticker.upper()}", params=params), tool=Tool.HISTORY_TICKER)
 
 
 @mcp.tool(annotations=_readonly("Batch score history"))
@@ -655,7 +656,7 @@ def history_batch(
         "end_date": end,
         "scoring_system_id": scoring_system_id,
     })
-    return _guard(lambda c: c.post("/v1/scores/history/batch", json=body), tool="history_batch")
+    return _guard(lambda c: c.post("/v1/scores/history/batch", json=body), tool=Tool.HISTORY_BATCH)
 
 
 @mcp.tool(annotations=_readonly("Top tickers history"))
@@ -668,19 +669,19 @@ def history_top(top: int = 10, scoring_system_id: Optional[int] = None) -> dict:
             return {"results": []}
         body = _clean({"tickers": symbols, "scoring_system_id": scoring_system_id})
         return c.post("/v1/scores/history/batch", json=body)
-    return _guard(call, tool="history_top")
+    return _guard(call, tool=Tool.HISTORY_TOP)
 
 
 @mcp.tool(annotations=_readonly("List scoring systems"))
 def systems_list() -> dict:
     """List the user's saved scoring systems."""
-    return _guard(lambda c: c.get("/v1/user/scores"), tool="systems_list")
+    return _guard(lambda c: c.get("/v1/user/scores"), tool=Tool.SYSTEMS_LIST)
 
 
 @mcp.tool(annotations=_readonly("Show scoring system"))
 def systems_show(system_id: int) -> dict:
     """Show a saved scoring system by ID."""
-    return _guard(lambda c: c.get(f"/v1/user/scores/{system_id}"), tool="systems_show")
+    return _guard(lambda c: c.get(f"/v1/user/scores/{system_id}"), tool=Tool.SYSTEMS_SHOW)
 
 
 @mcp.tool(
@@ -694,7 +695,7 @@ def systems_show(system_id: int) -> dict:
 )
 def systems_create(name: str, config: dict, description: Optional[str] = None) -> dict:
     """Create a saved scoring system from a config object."""
-    return _guard(lambda c: c.post("/v1/user/scores", json=_clean({"name": name, "description": description, "config": normalize_config(config)})), tool="systems_create")
+    return _guard(lambda c: c.post("/v1/user/scores", json=_clean({"name": name, "description": description, "config": normalize_config(config)})), tool=Tool.SYSTEMS_CREATE)
 
 
 @mcp.tool(
@@ -714,7 +715,7 @@ def systems_update(
 ) -> dict:
     """Update a saved scoring system."""
     normalized = normalize_config(config) if config is not None else None
-    return _guard(lambda c: c.put(f"/v1/user/scores/{system_id}", json=_clean({"name": name, "description": description, "config": normalized})), tool="systems_update")
+    return _guard(lambda c: c.put(f"/v1/user/scores/{system_id}", json=_clean({"name": name, "description": description, "config": normalized})), tool=Tool.SYSTEMS_UPDATE)
 
 
 @mcp.tool(
@@ -728,7 +729,7 @@ def systems_update(
 )
 def systems_delete(system_id: int) -> dict:
     """Delete a saved scoring system."""
-    return _guard(lambda c: c.delete(f"/v1/user/scores/{system_id}"), tool="systems_delete")
+    return _guard(lambda c: c.delete(f"/v1/user/scores/{system_id}"), tool=Tool.SYSTEMS_DELETE)
 
 
 @mcp.tool(
@@ -742,7 +743,7 @@ def systems_delete(system_id: int) -> dict:
 )
 def systems_apply(system_id: int) -> dict:
     """Apply a saved scoring system (increments its usage count)."""
-    return _guard(lambda c: c.post(f"/v1/user/scores/{system_id}/apply"), tool="systems_apply")
+    return _guard(lambda c: c.post(f"/v1/user/scores/{system_id}/apply"), tool=Tool.SYSTEMS_APPLY)
 
 
 # ------------------------------------------------------------------ #

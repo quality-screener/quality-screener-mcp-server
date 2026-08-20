@@ -5,7 +5,7 @@ call the same endpoints with the same ``X-Stobot-CLI-Token`` header. These
 headers are what make MCP usage attributable in product analytics.
 """
 
-from qscreener_mcp import __version__
+from qscreener_mcp import __version__, server
 from qscreener_mcp.client import (
     CLI_TOKEN_HEADER,
     CLIENT_HEADER,
@@ -13,6 +13,7 @@ from qscreener_mcp.client import (
     CLIENT_OP_HEADER,
     ApiClient,
 )
+from qscreener_mcp.constants import Tool
 
 
 def test_headers_identify_the_mcp_client() -> None:
@@ -36,8 +37,19 @@ def test_tool_name_is_sent_when_known() -> None:
     ``scores_show`` and ``scores_list`` both POST ``/v1/scores/list``, so the
     endpoint alone cannot identify which tool the user invoked.
     """
-    headers = ApiClient(api_url="http://api.test", token="tok", tool="scores_show")._headers()
+    headers = ApiClient(api_url="http://api.test", token="tok", tool=Tool.SCORES_SHOW)._headers()
     assert headers[CLIENT_OP_HEADER] == "scores_show"
+
+
+def test_tool_header_carries_the_enum_value_not_its_repr() -> None:
+    """The wire value must be the bare name the analytics groups by.
+
+    A plain ``Enum`` would serialize as ``Tool.SCORES_SHOW`` and silently break
+    every ``tool`` breakdown in PostHog.
+    """
+    headers = ApiClient(api_url="http://api.test", token="tok", tool=Tool.SCORES_SHOW)._headers()
+    assert headers[CLIENT_OP_HEADER] == "scores_show"
+    assert "Tool." not in headers[CLIENT_OP_HEADER]
 
 
 def test_tool_header_is_omitted_when_unset() -> None:
@@ -49,3 +61,19 @@ def test_tool_header_is_omitted_when_unset() -> None:
 def test_trailing_slash_is_stripped_from_api_url() -> None:
     """Base URL normalization is unaffected by the added headers."""
     assert ApiClient(api_url="http://api.test/", token="tok")._api_url == "http://api.test"
+
+
+def test_enum_matches_the_registered_mcp_tools() -> None:
+    """Every registered tool has an enum member, and vice versa.
+
+    This is the guard that keeps the analytics labels honest: adding a tool
+    without an enum member, or renaming one on either side, fails here instead
+    of silently producing an unlabelled or mislabelled event in PostHog.
+    """
+    registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
+    declared = {member.value for member in Tool}
+
+    assert registered == declared, (
+        f"tools missing from Tool: {sorted(registered - declared)}; "
+        f"Tool members with no registered tool: {sorted(declared - registered)}"
+    )

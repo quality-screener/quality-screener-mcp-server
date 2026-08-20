@@ -103,6 +103,6 @@ def test_bearer_token_none_when_context_unavailable(monkeypatch: pytest.MonkeyPa
 def test_guard_returns_error_without_token(monkeypatch: pytest.MonkeyPatch, no_local_token: Path) -> None:
     """``_guard`` short-circuits with an auth error when no token is available."""
     monkeypatch.setattr(server.mcp, "get_context", lambda: _fake_context(None))
-    result = server._guard(lambda client: {"unreachable": True})
+    result = server._guard(lambda client: {"unreachable": True}, tool="health")
     assert "error" in result
     assert "Not authenticated" in result["error"]

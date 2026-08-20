@@ -18,6 +18,9 @@ class _RecordingClient:
         """
         self.response = {} if response is None else response
         self.calls: list[dict[str, Any]] = []
+        # Tool names ``_guard`` was called with, so tests can assert the usage
+        # analytics label matches the tool the user actually invoked.
+        self.tools: list[str] = []
 
     def post(self, path: str, params: Optional[dict] = None, json: Optional[dict] = None) -> Any:
         """Record a POST call and return the canned response.
@@ -60,7 +63,12 @@ def patch_guard(monkeypatch: pytest.MonkeyPatch):
     """
     def install(response: Any = None) -> _RecordingClient:
         client = _RecordingClient(response)
-        monkeypatch.setattr(server, "_guard", lambda fn: fn(client))
+
+        def fake_guard(fn: Any, *, tool: str) -> Any:
+            client.tools.append(tool)
+            return fn(client)
+
+        monkeypatch.setattr(server, "_guard", fake_guard)
         return client
 
     return install

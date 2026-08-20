@@ -45,16 +45,32 @@ they are tied to your account. You can revoke them at any time by signing out.
 Our servers keep standard operational logs (timestamps, request paths, response
 status codes, error diagnostics) for security monitoring and debugging. These
 logs reference accounts by an internal pseudonymous user identifier, **not** by
-email address. They are not used to build a profile of you.
+email address. They are kept for security and debugging, not for analysis of how
+you use the product — that is covered separately below.
+
+### Product analytics
+
+The Quality Screener API records how its tools are used, so we can see which
+features people rely on. Each call is recorded with the tool name, the endpoint,
+the response status, how long it took, and your account identifier; your email
+address is attached to that account record. We do **not** record the arguments
+you pass to a tool — not your tickers, filters, or scoring configurations — nor
+any result returned to you.
+
+This happens on our API servers, not in the MCP server, which ships no analytics
+SDK of its own. Analytics are processed by PostHog on EU infrastructure.
 
 ### What we do **not** collect
 
 - Payment or financial account details — the service takes no payments and
   connects to no brokerage.
 - The content of your conversations with Claude or any other AI assistant.
+- The arguments you pass to tools, or the results returned to you.
 - Special-category data (health, biometric, political, religious, or similar).
-- Tracking or advertising identifiers. The MCP server sets no cookies and runs
-  no analytics or advertising trackers.
+- Tracking or advertising identifiers. The MCP server sets no cookies, embeds no
+  analytics SDK, and runs no advertising trackers. It does identify itself and
+  the tool being called to our API, which is what the product analytics above
+  record.
 
 ---
 
@@ -69,6 +85,9 @@ personal data to durable storage of its own. Specifically:
   and short-lived authorization codes, which expire within ten minutes.
 - When you call the `account_profile` tool, your email address passes **through**
   the server to your AI assistant in the response. It is not stored along the way.
+- It adds two headers to each API request naming itself, its version, and the
+  tool being called. These carry no personal data and are what let the product
+  analytics above distinguish MCP usage from the web application.
 
 Your account record, including your email address, lives in the Quality Screener
 service, not in the MCP server.

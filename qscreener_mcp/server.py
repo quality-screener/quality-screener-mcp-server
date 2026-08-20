@@ -43,6 +43,7 @@ from qscreener_mcp.constants import (
     CLI_TOKEN_HEADER,
     CONFIG_FILTER_KEYS,
     CREDENTIALS_FILENAME,
+    DESCRIPTION_LIMIT,
     DEFAULT_API_URL,
     DEFAULT_CONFIG_DIR_PARTS,
     DEFAULT_MCP_HOST,
@@ -60,6 +61,8 @@ from qscreener_mcp.constants import (
     ENV_WEBSITE_URL,
     NOT_AUTHENTICATED,
     OAUTH_FAILURE_HTML,
+    USD_MARKET_CAP_KEYS,
+    USD_PER_BILLION,
     Tool,
 )
 from qscreener_mcp.oauth import StobotOAuthProvider, store_auth_code
@@ -222,9 +225,6 @@ def _clean(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
 
-_DESCRIPTION_LIMIT = 200
-
-
 def _slim_score_rows(resp: Any, full_rows: bool = False) -> Any:
     """Shrink score-list responses for MCP consumption (payload shaping, not business logic).
 
@@ -235,7 +235,7 @@ def _slim_score_rows(resp: Any, full_rows: bool = False) -> Any:
     consumers only need to know which duplicate tickers exist, so by default:
 
       * ``duplicates`` collapses from a list of full rows to a list of ticker strings, and
-      * ``description`` is truncated to the first ``_DESCRIPTION_LIMIT`` characters.
+      * ``description`` is truncated to the first ``DESCRIPTION_LIMIT`` characters.
 
     Error dicts and non-list payloads pass through untouched. Pass ``full_rows=True`` to get
     the unmodified backend response.
@@ -249,8 +249,8 @@ def _slim_score_rows(resp: Any, full_rows: bool = False) -> Any:
         if isinstance(dups, list) and dups and isinstance(dups[0], dict):
             row["duplicates"] = [d.get("ticker") for d in dups if isinstance(d, dict)]
         desc = row.get("description")
-        if isinstance(desc, str) and len(desc) > _DESCRIPTION_LIMIT:
-            row["description"] = desc[:_DESCRIPTION_LIMIT] + "…"
+        if isinstance(desc, str) and len(desc) > DESCRIPTION_LIMIT:
+            row["description"] = desc[:DESCRIPTION_LIMIT] + "…"
     return resp
 
 
@@ -358,7 +358,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
     # Fold the USD-denominated market-cap variants onto the canonical billions key,
     # wherever the caller put them. An explicit canonical value always wins.
-    for usd_key, canonical_key in _USD_MARKET_CAP_KEYS.items():
+    for usd_key, canonical_key in USD_MARKET_CAP_KEYS.items():
         usd_value = _first_present(filters, usd_key)
         if usd_value is None:
             usd_value = _first_present(config, usd_key)
@@ -366,7 +366,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         if filters.get(canonical_key) is not None:
             continue
         if isinstance(usd_value, (int, float)) and not isinstance(usd_value, bool):
-            filters[canonical_key] = usd_value / _USD_PER_BILLION
+            filters[canonical_key] = usd_value / USD_PER_BILLION
 
     if filters:
         normalized["filters"] = filters

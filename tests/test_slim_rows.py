@@ -3,6 +3,7 @@
 from typing import Any
 
 from qscreener_mcp import server
+from qscreener_mcp.constants import DESCRIPTION_LIMIT
 
 
 def _score_response() -> dict[str, Any]:
@@ -36,7 +37,7 @@ def test_slim_collapses_duplicates_to_tickers_and_truncates_description() -> Non
 
     row = resp["data"][0]
     assert row["duplicates"] == ["GOOG", "ABEA.DE"]
-    assert len(row["description"]) == server._DESCRIPTION_LIMIT + 1  # + ellipsis
+    assert len(row["description"]) == DESCRIPTION_LIMIT + 1  # + ellipsis
     assert row["description"].endswith("…")
     # short descriptions and None duplicates pass through untouched
     assert resp["data"][1]["description"] == "short"

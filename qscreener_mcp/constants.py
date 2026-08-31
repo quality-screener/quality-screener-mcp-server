@@ -127,6 +127,20 @@ CONFIG_FILTER_KEYS = (
 # persists. So these variants must be rescaled onto the canonical key, not merely renamed:
 # the backend ignores unrecognized filter keys, silently widening the screen back to the
 # full universe.
+# Stage 1 — the scoring universe. These define the peer group each company is winsorized
+# and z-scored against, so they change every score; the backend applies them before scoring
+# (``CustomScoreConfig.scoring_universe_filters``). Deliberately a subset of
+# CONFIG_FILTER_KEYS: ``min_score``/``max_score`` filter on the very scores being computed,
+# and ``ticker``/``tickers`` select rows rather than define a population — all four are
+# stage-2 concerns.
+SCORING_UNIVERSE_KEYS = (
+    "sectors", "industries", "regions", "countries", "currencies", "exchanges",
+    "min_market_cap", "max_market_cap",
+)
+
+# The config key the backend reads stage 1 from.
+SCORING_UNIVERSE_CONFIG_KEY = "scoringUniverseFilters"
+
 USD_MARKET_CAP_KEYS = {
     "min_market_cap_usd": "min_market_cap",
     "max_market_cap_usd": "max_market_cap",

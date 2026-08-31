@@ -199,7 +199,7 @@ All tools require authentication. Filters use **OR logic within a filter** and
 | `scores_for_tickers` | `scores_for_tickers(tickers, scoring_system_id=None)` | Current scores for a specific list of tickers, under default scoring or a saved scoring system. Unknown tickers are omitted. |
 | `scores_statistics` | `scores_statistics(sectors=None, min_score=None, max_score=None, min_market_cap_usd=None, max_market_cap_usd=None)` | Min / max / average score statistics for a filtered universe. |
 | `scores_market_cap` | `scores_market_cap(sectors=None, min_score=None)` | Aggregated total market cap (USD) for a filtered universe. |
-| `score_compute` | `score_compute(config, sectors=None, industries=None, countries=None, currencies=None, exchanges=None, min_market_cap_usd=None, max_market_cap_usd=None, sort_by="quality_score", sort_order="desc", offset=0, limit=50, include_duplicates=False)` | Compute custom scores from a `CustomScoreConfig`, restricted to a filtered universe. |
+| `score_compute` | `score_compute(config, scoring_universe=None, sectors=None, industries=None, regions=None, countries=None, currencies=None, exchanges=None, min_market_cap_usd=None, max_market_cap_usd=None, sort_by="quality_score", sort_order="desc", offset=0, limit=50, include_duplicates=False)` | Compute custom scores from a `CustomScoreConfig`. `scoring_universe` picks the peer group (changes the scores); the other filters select rows (do not). |
 
 ### Sharing
 
@@ -276,40 +276,69 @@ containing weighted **metrics**, plus scoring parameters and an optional nested
       ]
     }
   ],
-  "filters": { "countries": ["Italy"], "min_market_cap": 1 }
+  "scoringUniverseFilters": { "countries": ["Italy"], "min_market_cap": 1 },
+  "filters": { "min_score": 1.2 }
 }
 ```
 
 Scoring parameters use camelCase: `winsorizePercentile` (1-10), `missingDataPercentile`
-(0.1-0.5), `normalizeGroupZScores` and `includeDuplicatesInScoring` (booleans). Screen
-filters go inside the nested `filters` block (market caps in **billions USD**). Loose
-inputs — snake_case keys, the legacy `winsorize`/`zScore` flags, or filter keys placed at
-the top level — are normalized to this shape automatically, but emitting it directly is
-preferred. Use `filters_list` to discover valid filter values, and build a config
+(0.1-0.5), `normalizeGroupZScores` and `includeDuplicatesInScoring` (booleans).
+`scoringUniverseFilters` defines the peer group the scores are computed against; the nested
+`filters` block holds saved-screen state. Market caps are in **billions USD** inside both
+blocks (the tool arguments take USD). Loose inputs — snake_case keys, the legacy
+`winsorize`/`zScore` flags, or filter keys placed at the top level — are normalized to this
+shape automatically, but emitting it directly is preferred. Use `filters_list` to discover valid filter values, and build a config
 interactively in the dashboard if you want a starting point to copy.
 
-### What the nested `filters` block does — and does not do
+### Two stages: score against, then filter
+
+Quality scores are **relative** — every company is winsorized and z-scored against a
+population — so *who is in the peer group* and *which rows you look at* are different
+questions, and `score_compute` takes them separately.
+
+| Stage | Where | Effect |
+|---|---|---|
+| **1. Scoring universe** | `scoring_universe` argument, or `config.scoringUniverseFilters` | applied **before** winsorize/z-score — **changes every score** |
+| **2. Result filters** | the `sectors` / `countries` / … arguments | applied **after** scoring — **never changes a score** |
+
+"Best European tech judged against European tech" and "best European tech judged against the
+world" are different lists, not the same list rescaled — narrowing the universe moves each
+metric's bounds, mean and σ by different amounts, so companies genuinely reorder:
+
+```jsonc
+// judged against European tech — the peer group is European tech
+score_compute(config, scoring_universe={"sectors": ["Technology"], "regions": ["Europe"]})
+
+// judged against the world — the peer group is everyone, then Europe is shown
+score_compute(config, sectors=["Technology"], regions=["Europe"])
+```
+
+Stage 1 accepts `sectors`, `industries`, `regions`, `countries`, `currencies`, `exchanges`,
+`min_market_cap_usd` and `max_market_cap_usd`. It rejects `min_score`, `max_score`, `ticker`
+and `tickers` with an error rather than ignoring them: the first two filter on the very
+scores being computed, the rest select rows.
+
+Every response carries a `scoring_universe` field naming the peer group and its size. Scores
+computed against different peer groups are not comparable — do not mix them in one table.
+
+Two edges worth knowing:
+
+- **`min_market_cap_usd` as a stage-2 argument also floors the scoring population.** This is
+  long-standing backend behaviour, kept for compatibility. Set `min_market_cap_usd` inside
+  `scoring_universe` to control the peer group explicitly; it overrides the stage-2 floor.
+  `max_market_cap_usd` filters rows only unless you set it in `scoring_universe`.
+- **A very small universe still scores.** There is no minimum-population guard yet, so
+  winsorizing at the 5th/95th percentile of a dozen companies returns confident nonsense.
+
+### What the nested `filters` block does
 
 It is **saved-screen state**. `screen_share` and `systems_create`/`systems_update` persist
 it so a shared screen or saved scoring system restores its filter selections when reopened
-in the dashboard. That is its purpose and it works.
+in the dashboard.
 
-It does **not** define the population your scores are computed against. `score_compute`
-sends the config to the live scoring endpoint, which parses it as `CustomScoreConfig` — a
-model that does not declare `filters` — so the block is ignored there. A config carrying
-`"filters": {"countries": ["Switzerland"]}` returns the full scored universe, not Swiss
-companies.
-
-More generally, **no filter currently narrows the scoring population**, with two
-exceptions: `min_market_cap_usd` (which sets the minimum-cap floor as well as filtering
-rows) and `includeDuplicatesInScoring`. Everything else — sectors, industries, countries,
-currencies, exchanges, `max_market_cap_usd`, tickers, search — selects which already-scored
-rows come back. Scores are identical whether you filter or not.
-
-Ranking a subset against itself (e.g. "best European tech, judged against European tech")
-is not expressible today. The design for an explicit scoring-universe stage is tracked in
-[quality-screener#194](https://github.com/quality-screener/quality-screener/pull/194); this
-documentation will be updated when it lands.
+It does not define the peer group — `scoringUniverseFilters` does. Passing a saved config to
+`score_compute` applies its `filters` block as **stage-2** filters (an explicit argument
+wins), matching what the dashboard does, so re-scoring a saved system keeps its view.
 
 ---
 

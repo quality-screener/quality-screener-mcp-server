@@ -147,3 +147,72 @@ def test_canonical_config_is_preserved() -> None:
         "groups": _groups(), "filters": {"countries": ["Italy"]},
     }
     assert server.normalize_config(canonical) == canonical
+
+
+def test_scoring_universe_survives_normalization() -> None:
+    """Stage 1 is carried through instead of being dropped by the key whitelist.
+
+    ``normalize_config`` rebuilds the config from known keys, so a field it does not know
+    about disappears. Before this was wired up, ``scoringUniverseFilters`` was stripped on
+    every call site — making stage 1 unreachable from ``score_compute`` and silently
+    removing the peer group from any screen an agent saved or shared.
+    """
+    out = server.normalize_config({
+        "name": "S", "groups": _groups(),
+        "scoringUniverseFilters": {"countries": ["Switzerland"], "sectors": ["Technology"]},
+    })
+    assert out["scoringUniverseFilters"] == {
+        "countries": ["Switzerland"], "sectors": ["Technology"],
+    }
+
+
+def test_scoring_universe_accepts_snake_case_and_rescales_market_caps() -> None:
+    """A loosely shaped universe is reshaped like the filters block: caps in billions."""
+    out = server.normalize_config({
+        "name": "S", "groups": _groups(),
+        "scoring_universe_filters": {
+            "countries": ["Italy"],
+            "min_market_cap_usd": 2_000_000_000,
+            "max_market_cap_usd": 50_000_000_000,
+        },
+    })
+    universe = out["scoringUniverseFilters"]
+    assert universe["countries"] == ["Italy"]
+    assert universe["min_market_cap"] == 2
+    assert universe["max_market_cap"] == 50
+    assert "min_market_cap_usd" not in universe
+
+
+def test_scoring_universe_drops_result_only_keys() -> None:
+    """Stage-2 keys cannot define a population and are not carried into stage 1.
+
+    ``min_score`` filters on the very scores being computed; ``tickers`` selects rows.
+    ``score_compute`` rejects them outright — this only pins that they never reach the
+    backend as part of the peer-group definition.
+    """
+    out = server.normalize_config({
+        "name": "S", "groups": _groups(),
+        "scoringUniverseFilters": {
+            "countries": ["Japan"], "min_score": 1.5, "tickers": ["7203.T"], "search": "auto",
+        },
+    })
+    assert out["scoringUniverseFilters"] == {"countries": ["Japan"]}
+
+
+def test_empty_scoring_universe_is_omitted() -> None:
+    """An empty block is left out entirely, so the backend scores the global universe."""
+    out = server.normalize_config({
+        "name": "S", "groups": _groups(), "scoringUniverseFilters": {},
+    })
+    assert "scoringUniverseFilters" not in out
+
+
+def test_result_filters_block_is_untouched_by_stage_one() -> None:
+    """``config['filters']`` keeps its saved-screen meaning alongside the new block."""
+    out = server.normalize_config({
+        "name": "S", "groups": _groups(),
+        "scoringUniverseFilters": {"sectors": ["Healthcare"]},
+        "filters": {"min_score": 1.2, "countries": ["France"]},
+    })
+    assert out["filters"] == {"min_score": 1.2, "countries": ["France"]}
+    assert out["scoringUniverseFilters"] == {"sectors": ["Healthcare"]}

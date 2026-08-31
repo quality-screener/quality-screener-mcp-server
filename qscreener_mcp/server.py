@@ -61,6 +61,8 @@ from qscreener_mcp.constants import (
     ENV_WEBSITE_URL,
     NOT_AUTHENTICATED,
     OAUTH_FAILURE_HTML,
+    SCORING_UNIVERSE_CONFIG_KEY,
+    SCORING_UNIVERSE_KEYS,
     USD_MARKET_CAP_KEYS,
     USD_PER_BILLION,
     Tool,
@@ -259,6 +261,7 @@ def _filters(
     ticker: Optional[str] = None,
     sectors: Optional[list[str]] = None,
     industries: Optional[list[str]] = None,
+    regions: Optional[list[str]] = None,
     countries: Optional[list[str]] = None,
     currencies: Optional[list[str]] = None,
     exchanges: Optional[list[str]] = None,
@@ -271,6 +274,7 @@ def _filters(
         "ticker": ticker,
         "sectors": sectors or None,
         "industries": industries or None,
+        "regions": regions or None,
         "countries": countries or None,
         "currencies": currencies or None,
         "exchanges": exchanges or None,
@@ -300,6 +304,53 @@ def _winsorize_percentile(raw: Any) -> int:
     if isinstance(raw, (int, float)) and 1 <= raw <= 10:
         return int(raw)
     return 5
+
+
+def _fold_usd_market_caps(block: dict[str, Any], fallback: Optional[dict[str, Any]] = None) -> None:
+    """Rescale ``*_market_cap_usd`` keys onto the canonical billions keys, in place.
+
+    The tools expose market caps in USD; a config's filter blocks store them in billions.
+    An explicit canonical value always wins, and the USD variant is removed either way —
+    the backend ignores unrecognized filter keys, so leaving one behind silently widens the
+    block back to the full universe.
+
+    Args:
+        block: The filter block to rewrite in place.
+        fallback: Optional dict to source a USD value from when the block has none — used
+            for the result filters, where a caller may leave the key at the config's top
+            level.
+    """
+    for usd_key, canonical_key in USD_MARKET_CAP_KEYS.items():
+        usd_value = _first_present(block, usd_key)
+        if usd_value is None and fallback is not None:
+            usd_value = _first_present(fallback, usd_key)
+        block.pop(usd_key, None)
+        if block.get(canonical_key) is not None:
+            continue
+        if isinstance(usd_value, (int, float)) and not isinstance(usd_value, bool):
+            block[canonical_key] = usd_value / USD_PER_BILLION
+
+
+def _scoring_universe_block(raw: Any) -> dict[str, Any]:
+    """Reshape a loose stage-1 scoring-universe block onto the backend's contract.
+
+    Stage 1 defines the peer group each company is scored against, so it accepts only keys
+    that can describe a population before any score exists (``SCORING_UNIVERSE_KEYS``).
+    Anything else — ``min_score``, ``max_score``, ``ticker``, ``tickers``, ``search`` — is a
+    stage-2 result filter and is not silently accepted here; ``score_compute`` rejects those
+    with a message naming the right stage rather than dropping them.
+
+    Args:
+        raw: The caller-supplied universe block, possibly loosely shaped or not a dict.
+
+    Returns:
+        A canonical stage-1 block with market caps in billions, empty values removed.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    block = {k: v for k, v in raw.items() if k in SCORING_UNIVERSE_KEYS or k in USD_MARKET_CAP_KEYS}
+    _fold_usd_market_caps(block)
+    return {k: v for k, v in block.items() if v is not None and v != []}
 
 
 def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -358,18 +409,24 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
     # Fold the USD-denominated market-cap variants onto the canonical billions key,
     # wherever the caller put them. An explicit canonical value always wins.
-    for usd_key, canonical_key in USD_MARKET_CAP_KEYS.items():
-        usd_value = _first_present(filters, usd_key)
-        if usd_value is None:
-            usd_value = _first_present(config, usd_key)
-        filters.pop(usd_key, None)
-        if filters.get(canonical_key) is not None:
-            continue
-        if isinstance(usd_value, (int, float)) and not isinstance(usd_value, bool):
-            filters[canonical_key] = usd_value / USD_PER_BILLION
+    _fold_usd_market_caps(filters, fallback=config)
 
     if filters:
         normalized["filters"] = filters
+
+    # Stage 1 — the scoring universe. Carried through on every call site: dropping it here
+    # would make the field unreachable from score_compute and would silently strip the peer
+    # group from a screen an agent saves or shares.
+    universe = _scoring_universe_block(
+        _first_present(
+            config,
+            SCORING_UNIVERSE_CONFIG_KEY,
+            "scoring_universe_filters",
+            "scoring_universe",
+        )
+    )
+    if universe:
+        normalized[SCORING_UNIVERSE_CONFIG_KEY] = universe
 
     return normalized
 
@@ -482,8 +539,10 @@ def scores_market_cap(sectors: Optional[list[str]] = None, min_score: Optional[f
 @mcp.tool(annotations=_readonly("Compute custom score"))
 def score_compute(
     config: dict,
+    scoring_universe: Optional[dict] = None,
     sectors: Optional[list[str]] = None,
     industries: Optional[list[str]] = None,
+    regions: Optional[list[str]] = None,
     countries: Optional[list[str]] = None,
     currencies: Optional[list[str]] = None,
     exchanges: Optional[list[str]] = None,
@@ -495,43 +554,95 @@ def score_compute(
     limit: int = 50,
     include_duplicates: bool = False,
 ) -> dict:
-    """Compute custom scores from a CustomScoreConfig object over the full scored universe.
+    """Compute custom scores from a CustomScoreConfig, scored against a chosen peer group.
 
     The ``config`` is a CustomScoreConfig: weighted metric ``groups`` (each with weighted
     ``metrics``) plus scoring parameters ``winsorizePercentile`` (1-10), ``missingDataPercentile``
     (0.1-0.5), ``normalizeGroupZScores`` and ``includeDuplicatesInScoring`` (booleans). Loose
     inputs (snake_case keys, legacy ``winsorize``/``zScore`` flags) are normalized automatically.
 
-    **Filters select which rows are returned; they do not change any score.** Scores are
-    relative — each company is winsorized and z-scored against a population — and that
-    population is currently the whole universe regardless of the filters below. The list
-    filters (``sectors``, ``industries``, ``countries``, ``currencies``, ``exchanges``) are
-    applied *after* scoring, each using OR logic within itself and AND logic across filters.
-    Market caps are in USD.
+    **Scoring happens in two stages, and they answer different questions.**
 
-    Two parameters *do* affect the scoring population today:
+    **Stage 1 — ``scoring_universe``: who is in the peer group.** Quality scores are
+    relative: each company is winsorized and z-scored against a population. Narrowing this
+    changes every score and can reorder the list. Accepts ``sectors``, ``industries``,
+    ``regions``, ``countries``, ``currencies``, ``exchanges``, ``min_market_cap_usd`` and
+    ``max_market_cap_usd``. Omit it to score against the whole universe.
 
-    - ``min_market_cap_usd`` — sets the minimum-cap floor of the scoring population, and
-      also filters the returned rows. ``max_market_cap_usd`` does **not**; it filters rows only.
-    - ``includeDuplicatesInScoring`` (in ``config``) — whether cross-listings join the peer
-      group as independent tickers.
+    **Stage 2 — the filter arguments below: which rows come back.** Applied after scoring,
+    so they never change a score. They accept the same keys as stage 1, so any filter can be
+    asked either way. OR logic within a filter, AND across filters.
 
-    A nested ``config['filters']`` block is persisted with saved and shared screens
-    (``screen_share``, ``systems_create``/``systems_update``) so a screen can restore its
-    filter selections; it is **not** read by this endpoint and does not define the scoring
-    population. To rank a subset against itself rather than against the world, no parameter
-    exists yet — see quality-screener#194.
+    So "best European tech judged against European tech" is
+    ``scoring_universe={"sectors": ["Technology"], "regions": ["Europe"]}``, while "best
+    European tech judged against the world" is ``sectors=["Technology"], regions=[...]`` as
+    stage-2 arguments. The response's ``scoring_universe`` field reports the peer group and
+    its size — scores computed against different peer groups are not comparable, so do not
+    mix them in one table.
+
+    Two things do not fit the split cleanly, and both are deliberate:
+
+    - ``min_market_cap_usd`` as a stage-2 argument **also** floors the scoring population
+      (a long-standing backend behaviour). Set ``min_market_cap_usd`` inside
+      ``scoring_universe`` to control the peer group explicitly; it overrides the stage-2
+      floor. ``max_market_cap_usd`` filters rows only unless set in ``scoring_universe``.
+    - ``min_score``/``max_score``/``ticker``/``tickers`` cannot appear in
+      ``scoring_universe``: the first two filter on the scores being computed, the rest
+      select rows. Passing them there returns an error rather than being ignored.
+
+    A nested ``config['filters']`` block is saved-screen state, persisted by
+    ``screen_share``/``systems_create``/``systems_update`` so a screen restores its view.
+    Passing a saved config here applies that block as stage-2 filters (an explicit argument
+    below wins), matching what the web app does — it never defines the peer group.
     """
+    universe = dict(config.get(SCORING_UNIVERSE_CONFIG_KEY) or {}) if isinstance(config, dict) else {}
+    if scoring_universe:
+        universe.update(scoring_universe)
+    rejected = sorted(
+        k for k in universe
+        if k not in SCORING_UNIVERSE_KEYS and k not in USD_MARKET_CAP_KEYS
+    )
+    if rejected:
+        return {
+            "error": (
+                f"{', '.join(rejected)} cannot define the scoring universe. "
+                f"Stage 1 accepts {', '.join(SCORING_UNIVERSE_KEYS)} "
+                "(market caps also as min_market_cap_usd/max_market_cap_usd). "
+                "min_score/max_score/ticker/tickers filter already-computed scores — "
+                "pass them as stage-2 arguments instead."
+            )
+        }
+
+    normalized = normalize_config({**config, SCORING_UNIVERSE_CONFIG_KEY: universe} if universe else config)
+
+    # A saved screen's ``filters`` block is inert on this endpoint, so fold it into the
+    # stage-2 request filters instead of dropping it — the web app does the same. Config
+    # market caps are in billions; the request's are in USD.
+    saved = normalized.get("filters") or {}
+    saved_min_cap = saved.get("min_market_cap")
+    saved_max_cap = saved.get("max_market_cap")
     body = {
-        "score_request": {"config": normalize_config(config)},
+        "score_request": {"config": normalized},
         "filters": _filters(
-            sectors=sectors,
-            industries=industries,
-            countries=countries,
-            currencies=currencies,
-            exchanges=exchanges,
-            min_market_cap=min_market_cap_usd,
-            max_market_cap=max_market_cap_usd,
+            sectors=sectors or saved.get("sectors"),
+            industries=industries or saved.get("industries"),
+            regions=regions or saved.get("regions"),
+            countries=countries or saved.get("countries"),
+            currencies=currencies or saved.get("currencies"),
+            exchanges=exchanges or saved.get("exchanges"),
+            min_score=saved.get("min_score"),
+            max_score=saved.get("max_score"),
+            ticker=saved.get("ticker"),
+            min_market_cap=(
+                min_market_cap_usd
+                if min_market_cap_usd is not None
+                else (saved_min_cap * USD_PER_BILLION if saved_min_cap is not None else None)
+            ),
+            max_market_cap=(
+                max_market_cap_usd
+                if max_market_cap_usd is not None
+                else (saved_max_cap * USD_PER_BILLION if saved_max_cap is not None else None)
+            ),
         ),
     }
     params = {

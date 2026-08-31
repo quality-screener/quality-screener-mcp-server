@@ -188,3 +188,108 @@ def test_systems_update_omits_config_when_unset(patch_guard) -> None:
     client = patch_guard({"id": 1})
     server.systems_update(system_id=1, name="Renamed")
     assert "config" not in client.calls[0]["json"]
+
+
+def test_score_compute_sends_scoring_universe_as_stage_one(patch_guard) -> None:
+    """``scoring_universe`` lands in the config, not in the request's result filters.
+
+    The two stages hit different parts of the payload: stage 1 is
+    ``score_request.config.scoringUniverseFilters`` (applied before winsorize/z-score),
+    stage 2 is the top-level ``filters`` block (applied after). Sending stage 1 to the
+    wrong place is the bug quality-screener#194 was opened for.
+    """
+    client = patch_guard()
+    server.score_compute(
+        config={"name": "x"},
+        scoring_universe={"countries": ["Switzerland"], "sectors": ["Technology"]},
+    )
+    body = client.calls[0]["json"]
+    assert body["score_request"]["config"]["scoringUniverseFilters"] == {
+        "countries": ["Switzerland"], "sectors": ["Technology"],
+    }
+    assert "countries" not in body["filters"]
+
+
+def test_score_compute_keeps_the_two_stages_separate(patch_guard) -> None:
+    """The same filter can be asked as either stage and reaches a different place."""
+    client = patch_guard()
+    server.score_compute(
+        config={"name": "x"},
+        scoring_universe={"countries": ["Switzerland"]},
+        countries=["Switzerland", "Italy"],
+    )
+    body = client.calls[0]["json"]
+    assert body["score_request"]["config"]["scoringUniverseFilters"]["countries"] == ["Switzerland"]
+    assert body["filters"]["countries"] == ["Switzerland", "Italy"]
+
+
+def test_score_compute_rescales_universe_market_caps_to_billions(patch_guard) -> None:
+    """Stage-1 caps are USD in the tool signature and billions in the config block."""
+    client = patch_guard()
+    server.score_compute(
+        config={"name": "x"},
+        scoring_universe={"min_market_cap_usd": 5_000_000_000},
+    )
+    universe = client.calls[0]["json"]["score_request"]["config"]["scoringUniverseFilters"]
+    assert universe["min_market_cap"] == 5
+
+
+def test_score_compute_argument_overrides_universe_in_config(patch_guard) -> None:
+    """An explicit ``scoring_universe`` wins over one already carried in the config."""
+    client = patch_guard()
+    server.score_compute(
+        config={"name": "x", "scoringUniverseFilters": {"countries": ["Japan"]}},
+        scoring_universe={"countries": ["Germany"]},
+    )
+    universe = client.calls[0]["json"]["score_request"]["config"]["scoringUniverseFilters"]
+    assert universe["countries"] == ["Germany"]
+
+
+def test_score_compute_rejects_result_filters_in_the_scoring_universe(patch_guard) -> None:
+    """Stage-2 keys in stage 1 are an error, not a silent no-op.
+
+    ``min_score`` filters on the scores being computed, so accepting it before scoring
+    would be meaningless — the exact silent-wrong-answer failure this split removes.
+    """
+    client = patch_guard()
+    result = server.score_compute(
+        config={"name": "x"},
+        scoring_universe={"countries": ["Spain"], "min_score": 1.5},
+    )
+    assert "min_score" in result["error"]
+    assert client.calls == []
+
+
+def test_score_compute_applies_a_saved_screens_filters_as_stage_two(patch_guard) -> None:
+    """A saved config's ``filters`` block is inert on this endpoint, so it is forwarded.
+
+    ``CustomScoreConfig`` has no ``filters`` field, so the block would otherwise vanish —
+    an agent re-scoring a saved system would silently lose the screen's result filters.
+    Config caps are in billions, the request's in USD.
+    """
+    client = patch_guard()
+    server.score_compute(config={
+        "name": "x",
+        "filters": {"countries": ["France"], "min_score": 1.1, "min_market_cap": 3},
+    })
+    filters = client.calls[0]["json"]["filters"]
+    assert filters["countries"] == ["France"]
+    assert filters["min_score"] == 1.1
+    assert filters["min_market_cap"] == 3_000_000_000
+
+
+def test_score_compute_argument_overrides_a_saved_screens_filter(patch_guard) -> None:
+    """An explicit stage-2 argument wins over the saved screen's stored value."""
+    client = patch_guard()
+    server.score_compute(
+        config={"name": "x", "filters": {"countries": ["France"]}},
+        countries=["Norway"],
+    )
+    assert client.calls[0]["json"]["filters"]["countries"] == ["Norway"]
+
+
+def test_score_compute_forwards_regions_as_a_result_filter(patch_guard) -> None:
+    """Both stages accept the same keys, so ``regions`` works as a stage-2 filter too."""
+    client = patch_guard()
+    server.score_compute(config={"name": "x"}, regions=["Europe"])
+    assert client.calls[0]["json"]["filters"]["regions"] == ["Europe"]

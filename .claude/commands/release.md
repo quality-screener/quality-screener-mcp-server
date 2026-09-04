@@ -12,6 +12,7 @@ Cut a new release for `qscreener-mcp`. The bump type is `$1` (default to `patch`
 - Git tags use a `v` prefix (e.g. `v0.2.0`); the `version` fields in `pyproject.toml` and `server.json` do NOT (e.g. `0.2.0`).
 - Releases are cut **directly on `main`** — this repo has no `develop` branch and `main` is not protected. Do not open a release PR.
 - Never push or tag until the version edits are committed.
+- **The agent never pushes to `main`.** Commit and tag locally, then stop and hand off — the user runs the actual `git push` themselves. This mirrors the `quality-screener` release process, where the agent opens the release PR but leaves merging (and thus the push to `main`) to the user.
 
 ## Steps
 
@@ -48,11 +49,9 @@ Cut a new release for `qscreener-mcp`. The bump type is `$1` (default to `patch`
 6. **Tag the release commit.**
    - `git tag vNEW`
 
-7. **Push** the branch and the tag.
-   - `git push origin main`
-   - `git push origin vNEW`
+7. **Stop before pushing.** Report that the version-bump commit and tag `vNEW` are ready locally on `main`, and ask the user to run `git push origin main && git push origin vNEW` themselves. Do not run these pushes.
 
-8. **Gather the changelog** since the previous tag:
+8. **Gather the changelog** since the previous tag (once the user confirms the push is done):
    - `git log <previous-tag>..HEAD --pretty=format:"%H %s"` — or `git log --pretty=format:"%H %s"` for the first release.
    - Resolve the repo slug with `gh repo view --json nameWithOwner -q .nameWithOwner`.
    - Since merges here are squashed, most subjects already carry a `(#123)` suffix — link that PR. Otherwise link the commit short SHA.

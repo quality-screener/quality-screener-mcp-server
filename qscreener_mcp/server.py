@@ -27,11 +27,13 @@ PORT / QSCREENER_MCP_PORT Bind port for HTTP transports (Railway sets PORT)
 QSCREENER_MCP_HOST        Bind host for HTTP transports (default 0.0.0.0)
 """
 
+import functools
 import json
 import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import anyio
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -203,7 +205,34 @@ def _readonly(title: str) -> ToolAnnotations:
     return ToolAnnotations(title=title, readOnlyHint=True, openWorldHint=True)
 
 
-@mcp.tool(annotations=_readonly("Auth status"))
+def _tool(**tool_kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Register a synchronous tool so it runs in a worker thread, not on the event loop.
+
+    The tools call the backend with a blocking ``httpx.Client`` (timeout
+    ``DEFAULT_TIMEOUT``). FastMCP calls a plain ``def`` tool directly on the event loop,
+    so one slow backend call used to stall *every* other request on the server,
+    including the bearer-token check on concurrent requests. Those checks then timed
+    out and were answered with 401, and MCP clients discard their credentials on a 401:
+    a slow ``score_compute`` could sign the user out.
+
+    The registered tool is an ``async`` wrapper that hands the call to a worker thread
+    (``anyio.to_thread.run_sync`` copies the context, so ``mcp.get_context()`` and the
+    bearer token still resolve). The original sync function is returned unchanged, so
+    module-level callers and tests keep calling it directly.
+    """
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        async def offloaded(*args: Any, **kwargs: Any) -> Any:
+            return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+        mcp.tool(**tool_kwargs)(offloaded)
+        return fn
+
+    return decorator
+
+
+@_tool(annotations=_readonly("Auth status"))
 def auth_status() -> dict:
     """Report whether a CLI token is present and which user it authenticates as."""
     if not _bearer_token():
@@ -211,13 +240,13 @@ def auth_status() -> dict:
     return _guard(lambda c: c.get("/v1/cli/auth/whoami"), tool=Tool.AUTH_STATUS)
 
 
-@mcp.tool(annotations=_readonly("API health"))
+@_tool(annotations=_readonly("API health"))
 def health() -> dict:
     """Check API and database health."""
     return _guard(lambda c: c.get("/health"), tool=Tool.HEALTH)
 
 
-@mcp.tool(annotations=_readonly("Account profile"))
+@_tool(annotations=_readonly("Account profile"))
 def account_profile() -> dict:
     """Return the signed-in user's profile (email, username, organization)."""
     return _guard(lambda c: c.get("/v1/auth/profile"), tool=Tool.ACCOUNT_PROFILE)
@@ -431,7 +460,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-@mcp.tool(annotations=_readonly("List scored tickers"))
+@_tool(annotations=_readonly("List scored tickers"))
 def scores_list(
     ticker: Optional[str] = None,
     sectors: Optional[list[str]] = None,
@@ -468,20 +497,20 @@ def scores_list(
     return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/list", params=params, json=body), tool=Tool.SCORES_LIST), full_rows)
 
 
-@mcp.tool(annotations=_readonly("Top tickers by score"))
+@_tool(annotations=_readonly("Top tickers by score"))
 def scores_top(limit: int = 20) -> dict:
     """Return the top tickers by quality score as a {ticker: score} map."""
     return _guard(lambda c: c.get("/v1/scores/", params={"limit": limit}), tool=Tool.SCORES_TOP)
 
 
-@mcp.tool(annotations=_readonly("Show ticker score"))
+@_tool(annotations=_readonly("Show ticker score"))
 def scores_show(ticker: str) -> dict:
     """Return the score row(s) for a single ticker."""
     body = _filters(ticker=ticker.upper())
     return _guard(lambda c: c.post("/v1/scores/list", params={"limit": 5, "include_duplicates": "true"}, json=body), tool=Tool.SCORES_SHOW)
 
 
-@mcp.tool(annotations=_readonly("Scores for tickers"))
+@_tool(annotations=_readonly("Scores for tickers"))
 def scores_for_tickers(
     tickers: list[str],
     scoring_system_id: Optional[int] = None,
@@ -513,7 +542,7 @@ def scores_for_tickers(
     return _slim_score_rows(_guard(lambda c: c.post("/v1/scores/by-tickers", json=body), tool=Tool.SCORES_FOR_TICKERS), full_rows)
 
 
-@mcp.tool(annotations=_readonly("Score statistics"))
+@_tool(annotations=_readonly("Score statistics"))
 def scores_statistics(
     sectors: Optional[list[str]] = None,
     min_score: Optional[float] = None,
@@ -529,14 +558,14 @@ def scores_statistics(
     return _guard(lambda c: c.post("/v1/scores/statistics", json=body), tool=Tool.SCORES_STATISTICS)
 
 
-@mcp.tool(annotations=_readonly("Aggregated market cap"))
+@_tool(annotations=_readonly("Aggregated market cap"))
 def scores_market_cap(sectors: Optional[list[str]] = None, min_score: Optional[float] = None) -> dict:
     """Return aggregated total market cap (USD) for a filtered universe."""
     body = _filters(sectors=sectors, min_score=min_score)
     return _guard(lambda c: c.post("/v1/scores/total-market-cap", json=body), tool=Tool.SCORES_MARKET_CAP)
 
 
-@mcp.tool(annotations=_readonly("Compute custom score"))
+@_tool(annotations=_readonly("Compute custom score"))
 def score_compute(
     config: dict,
     scoring_universe: Optional[dict] = None,
@@ -653,7 +682,7 @@ def score_compute(
     return _guard(lambda c: c.post("/v1/scores/custom", params=params, json=body), tool=Tool.SCORE_COMPUTE)
 
 
-@mcp.tool(
+@_tool(
     annotations=ToolAnnotations(
         title="Share screen link",
         readOnlyHint=False,
@@ -697,13 +726,13 @@ def screen_share(config: dict) -> dict:
     return _guard(call, tool=Tool.SCREEN_SHARE)
 
 
-@mcp.tool(annotations=_readonly("List filter values"))
+@_tool(annotations=_readonly("List filter values"))
 def filters_list() -> dict:
     """Return available filter values (sectors, industries, countries, currencies, exchanges)."""
     return _guard(lambda c: c.get("/v1/filters/values"), tool=Tool.FILTERS_LIST)
 
 
-@mcp.tool(annotations=_readonly("List tickers"))
+@_tool(annotations=_readonly("List tickers"))
 def tickers_list(limit: Optional[int] = None) -> dict:
     """Return available tickers, optionally truncated to ``limit``."""
     def call(c: ApiClient) -> dict:
@@ -715,7 +744,7 @@ def tickers_list(limit: Optional[int] = None) -> dict:
     return _guard(call, tool=Tool.TICKERS_LIST)
 
 
-@mcp.tool(annotations=_readonly("Search tickers"))
+@_tool(annotations=_readonly("Search tickers"))
 def tickers_search(query: str) -> dict:
     """Search available tickers by case-insensitive substring."""
     def call(c: ApiClient) -> dict:
@@ -727,7 +756,7 @@ def tickers_search(query: str) -> dict:
     return _guard(call, tool=Tool.TICKERS_SEARCH)
 
 
-@mcp.tool(annotations=_readonly("Ticker score history"))
+@_tool(annotations=_readonly("Ticker score history"))
 def history_ticker(
     ticker: str,
     start: Optional[str] = None,
@@ -739,7 +768,7 @@ def history_ticker(
     return _guard(lambda c: c.get(f"/v1/scores/history/{ticker.upper()}", params=params), tool=Tool.HISTORY_TICKER)
 
 
-@mcp.tool(annotations=_readonly("Batch score history"))
+@_tool(annotations=_readonly("Batch score history"))
 def history_batch(
     tickers: list[str],
     start: Optional[str] = None,
@@ -756,7 +785,7 @@ def history_batch(
     return _guard(lambda c: c.post("/v1/scores/history/batch", json=body), tool=Tool.HISTORY_BATCH)
 
 
-@mcp.tool(annotations=_readonly("Top tickers history"))
+@_tool(annotations=_readonly("Top tickers history"))
 def history_top(top: int = 10, scoring_system_id: Optional[int] = None) -> dict:
     """Fetch the top-N tickers and return their score history."""
     def call(c: ApiClient) -> dict:
@@ -769,19 +798,19 @@ def history_top(top: int = 10, scoring_system_id: Optional[int] = None) -> dict:
     return _guard(call, tool=Tool.HISTORY_TOP)
 
 
-@mcp.tool(annotations=_readonly("List scoring systems"))
+@_tool(annotations=_readonly("List scoring systems"))
 def systems_list() -> dict:
     """List the user's saved scoring systems."""
     return _guard(lambda c: c.get("/v1/user/scores"), tool=Tool.SYSTEMS_LIST)
 
 
-@mcp.tool(annotations=_readonly("Show scoring system"))
+@_tool(annotations=_readonly("Show scoring system"))
 def systems_show(system_id: int) -> dict:
     """Show a saved scoring system by ID."""
     return _guard(lambda c: c.get(f"/v1/user/scores/{system_id}"), tool=Tool.SYSTEMS_SHOW)
 
 
-@mcp.tool(
+@_tool(
     annotations=ToolAnnotations(
         title="Create scoring system",
         readOnlyHint=False,
@@ -795,7 +824,7 @@ def systems_create(name: str, config: dict, description: Optional[str] = None) -
     return _guard(lambda c: c.post("/v1/user/scores", json=_clean({"name": name, "description": description, "config": normalize_config(config)})), tool=Tool.SYSTEMS_CREATE)
 
 
-@mcp.tool(
+@_tool(
     annotations=ToolAnnotations(
         title="Update scoring system",
         readOnlyHint=False,
@@ -815,7 +844,7 @@ def systems_update(
     return _guard(lambda c: c.put(f"/v1/user/scores/{system_id}", json=_clean({"name": name, "description": description, "config": normalized})), tool=Tool.SYSTEMS_UPDATE)
 
 
-@mcp.tool(
+@_tool(
     annotations=ToolAnnotations(
         title="Delete scoring system",
         readOnlyHint=False,
@@ -829,7 +858,7 @@ def systems_delete(system_id: int) -> dict:
     return _guard(lambda c: c.delete(f"/v1/user/scores/{system_id}"), tool=Tool.SYSTEMS_DELETE)
 
 
-@mcp.tool(
+@_tool(
     annotations=ToolAnnotations(
         title="Apply scoring system",
         readOnlyHint=False,

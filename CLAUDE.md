@@ -35,12 +35,15 @@ QSCREENER_MCP_TRANSPORT=streamable-http QSCREENER_MCP_PORT=8080 \
 
 An MCP façade over the Quality Screener REST API (the "stobot" backend), with **no
 dependency on the backend Python package** — every tool builds a request and returns the
-decoded JSON. Extending it means adding an `@mcp.tool()` that delegates to `_guard`.
+decoded JSON. Extending it means adding an `@_tool()` that delegates to `_guard`.
+`_tool` wraps `@mcp.tool()` so the (blocking) tool body runs in a worker thread; never
+register a sync tool with `@mcp.tool()` directly, or one slow backend call stalls the
+whole server, including the token checks of concurrent requests.
 
 Four modules under `qscreener_mcp/`:
 
 - **`server.py`** — the whole tool surface (~760 lines). The `FastMCP` instance, every
-  `@mcp.tool()`, token resolution, and the `main()` transport entry point. Config
+  `@_tool()`, token resolution, and the `main()` transport entry point. Config
   (`_API_URL`, `_WEBSITE_URL`, `_PUBLIC_URL`, `_MCP_HOST`) resolves **at import time**
   from env vars, so tests patch the module attribute
   (`monkeypatch.setattr(server, "_WEBSITE_URL", ...)`) rather than the env var.
@@ -83,8 +86,14 @@ result becomes `{"status": "ok"}`.
   The provider **mints no tokens of its own** — it bridges to the backend's CLI-token
   system. The web app's `/cli-auth` page exchanges the user's session for a CLI token and
   posts it to `/oauth/callback` (`server._oauth_callback` → `oauth.store_auth_code`); that
-  **CLI token IS the OAuth access token**. Bearer tokens are validated on *every* request
-  via `GET /v1/cli/auth/whoami`. Refresh tokens are unsupported (CLI tokens are long-lived).
+  **CLI token IS the OAuth access token**. Bearer tokens are validated via
+  `GET /v1/cli/auth/whoami` with a 5-minute positive cache. **Only a backend 401/403
+  rejects a token**; a timeout, 5xx or 429 is "unavailable": a token confirmed within
+  `TOKEN_GRACE_TTL` is still accepted, otherwise the request fails with a 5xx. Never
+  answer an outage with 401: MCP clients discard credentials on a 401.
+  The token response carries `expires_in` and a stateless refresh token
+  (`REFRESH_TOKEN_PREFIX` + the CLI token); refreshing re-validates and returns the same
+  CLI token until the backend revokes or expires it.
 
 ## Adapters
 

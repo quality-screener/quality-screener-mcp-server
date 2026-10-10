@@ -88,6 +88,33 @@ MCP_CLIENTS_FILENAME = "mcp_clients.json"
 # Seconds. Codes are exchanged immediately; ten minutes is generous.
 AUTH_CODE_TTL = 600
 
+# Seconds. Lifetime advertised to MCP clients for an access token. The underlying CLI
+# token lives far longer (backend default: 90 days); advertising a short lifetime makes
+# clients use the refresh grant, which re-validates against the backend, instead of
+# holding a credential they can only recover from by sending the user back to a browser.
+ACCESS_TOKEN_EXPIRES_IN = 3600
+
+# Prefix that marks a refresh token issued by this server. The remainder is the CLI
+# token itself, so refresh is stateless and survives restarts and redeploys (nothing to
+# persist, and no CLI token is ever written to disk by this server).
+REFRESH_TOKEN_PREFIX = "qsrt_"
+
+# Seconds. Per-attempt timeout when validating a bearer token against the backend.
+TOKEN_VALIDATION_TIMEOUT = 10.0
+
+# Extra validation attempts after the first one fails for a transient reason
+# (timeout, connection error, 5xx, 429), and the pause between attempts in seconds.
+TOKEN_VALIDATION_RETRIES = 1
+TOKEN_VALIDATION_RETRY_DELAY = 0.5
+
+# Seconds. A token the backend confirmed within this window is accepted without another
+# backend round trip. Also bounds how long a revoked token can keep working here.
+TOKEN_CACHE_TTL = 300
+
+# Seconds. When the backend is unreachable, a token it confirmed within this window is
+# still accepted, so a backend blip does not sign every connected client out.
+TOKEN_GRACE_TTL = 6 * 3600
+
 # ------------------------------------------------------------------ #
 # User-facing messages                                                 #
 # ------------------------------------------------------------------ #

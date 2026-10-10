@@ -158,9 +158,11 @@ MCP OAuth flow:
 3. The server hands the token to the MCP client, which sends it as a bearer token
    on every subsequent request.
 
-The token is validated on each request by calling the backend's
-`/v1/cli/auth/whoami` endpoint, so a revoked or expired token is rejected
-immediately. The server never persists user tokens.
+The token is validated against the backend's `/v1/cli/auth/whoami` endpoint
+(cached for up to 5 minutes), so a revoked or expired token stops working within
+that window. A backend outage is not treated as a revoked token: recently confirmed
+tokens keep working, and clients refresh instead of sending the user back to the
+browser. The server never persists user tokens.
 
 ### Local (stdio)
 

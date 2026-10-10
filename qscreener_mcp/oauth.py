@@ -13,12 +13,23 @@ without requiring an external OAuth service.  The flow:
    registered ``redirect_uri``.
 4. ``exchange_authorization_code()`` returns the CLI token as the OAuth access
    token — no separate credential is minted; the CLI token IS the bearer.
-5. ``load_access_token()`` validates incoming bearer tokens by calling the
-   backend ``GET /v1/cli/auth/whoami`` endpoint on every authenticated request.
+5. ``load_access_token()`` validates incoming bearer tokens against the backend
+   ``GET /v1/cli/auth/whoami`` endpoint, with a short positive cache.
+6. A refresh token (``REFRESH_TOKEN_PREFIX`` + the CLI token) is issued alongside the
+   access token, so a client whose access token is rejected can recover through the
+   refresh grant instead of sending the user back through the browser.
+
+Only a definitive backend answer (401/403) makes a token invalid. A backend that is
+slow, down or rate-limiting is treated as *unavailable*: recently confirmed tokens
+stay accepted for ``TOKEN_GRACE_TTL``, and otherwise the request fails with a server
+error rather than a 401, because MCP clients discard their credentials on a 401.
 
 All state is in-memory; suitable for single-process local and Railway deployments.
 """
 
+import asyncio
+import enum
+import hashlib
 import json
 import logging
 import os
@@ -44,11 +55,18 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 
 from qscreener_mcp.constants import (
+    ACCESS_TOKEN_EXPIRES_IN,
     AUTH_CODE_TTL,
     CLI_TOKEN_HEADER,
     DEFAULT_CONFIG_DIR_PARTS,
     ENV_CONFIG_DIR,
     MCP_CLIENTS_FILENAME,
+    REFRESH_TOKEN_PREFIX,
+    TOKEN_CACHE_TTL,
+    TOKEN_GRACE_TTL,
+    TOKEN_VALIDATION_RETRIES,
+    TOKEN_VALIDATION_RETRY_DELAY,
+    TOKEN_VALIDATION_TIMEOUT,
 )
 
 
@@ -79,6 +97,49 @@ _clients: dict[str, OAuthClientInformationFull] = _load_clients()
 _pending: dict[str, dict] = {}
 # authorization_code → CLI token + OAuth metadata
 _codes: dict[str, dict] = {}
+# sha256(CLI token) → (user_id, monotonic time the backend last confirmed it)
+_validated: dict[str, tuple[Optional[str], float]] = {}
+
+
+class BackendUnavailableError(RuntimeError):
+    """The backend could not say whether a token is valid (timeout, 5xx, 429...).
+
+    Raised instead of rejecting the token, so the HTTP layer answers with a server
+    error rather than a 401. MCP clients treat a 401 as "credentials revoked" and
+    discard them; a 5xx is treated as transient and retried.
+    """
+
+
+class _Verdict(enum.Enum):
+    VALID = "valid"
+    INVALID = "invalid"
+    UNAVAILABLE = "unavailable"
+
+
+def _token_key(token: str) -> str:
+    """Cache key for a token, so raw tokens are not kept as dict keys."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _cli_token_from_refresh(refresh_token: str) -> Optional[str]:
+    """Return the CLI token wrapped in one of our refresh tokens, else ``None``."""
+    if not refresh_token.startswith(REFRESH_TOKEN_PREFIX):
+        return None
+    return refresh_token[len(REFRESH_TOKEN_PREFIX):] or None
+
+
+def _token_response(cli_token: str) -> OAuthToken:
+    """OAuth token response for a CLI token: short advertised lifetime + refresh token."""
+    return OAuthToken(
+        access_token=cli_token,
+        token_type="Bearer",
+        expires_in=ACCESS_TOKEN_EXPIRES_IN,
+        refresh_token=f"{REFRESH_TOKEN_PREFIX}{cli_token}",
+    )
+
+
+# Sentinel returned by ``_resolve_user`` when the backend rejects a token.
+_REJECTED = object()
 
 
 class StobotOAuthProvider(OAuthAuthorizationServerProvider):
@@ -142,20 +203,28 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
-        """Return the CLI token as the OAuth access token (no separate token minted)."""
+        """Return the CLI token as the OAuth access token, plus a refresh token."""
         entry = _codes.pop(authorization_code.code, None)
         if not entry:
             raise TokenError(error="invalid_grant", error_description="Code not found or already used.")
-        return OAuthToken(access_token=entry["cli_token"], token_type="Bearer")
+        return _token_response(entry["cli_token"])
 
     # ------------------------------------------------------------------ #
-    # Refresh tokens — not supported (CLI tokens are long-lived)          #
+    # Refresh tokens                                                       #
     # ------------------------------------------------------------------ #
+    #
+    # The refresh token is ``REFRESH_TOKEN_PREFIX`` + the CLI token, so refreshing is
+    # stateless: nothing to persist, nothing lost on restart or redeploy. Refreshing
+    # hands back the same CLI token for as long as the backend still accepts it; once
+    # the backend revokes or expires it, the refresh fails with ``invalid_grant`` and
+    # the client starts a fresh browser login, which is the correct outcome.
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
-        return None
+        if _cli_token_from_refresh(refresh_token) is None:
+            return None
+        return RefreshToken(token=refresh_token, client_id=client.client_id, scopes=[])
 
     async def exchange_refresh_token(
         self,
@@ -163,28 +232,81 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        raise TokenError(error="unsupported_grant_type")
+        cli_token = _cli_token_from_refresh(refresh_token.token)
+        if cli_token is None:
+            raise TokenError(error="invalid_grant", error_description="Unknown refresh token.")
+        # Raises BackendUnavailableError (-> HTTP 500, client retries later) when the
+        # backend cannot answer and the token has no recent confirmation.
+        if await self._resolve_user(cli_token) is _REJECTED:
+            raise TokenError(
+                error="invalid_grant",
+                error_description="The sign-in has been revoked or has expired. Sign in again.",
+            )
+        return _token_response(cli_token)
 
     # ------------------------------------------------------------------ #
     # Token verification                                                   #
     # ------------------------------------------------------------------ #
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        """Validate a bearer token by calling the backend whoami endpoint."""
+        """Validate a bearer token, distinguishing "invalid" from "backend unavailable".
+
+        Returns ``None`` (-> 401) only when the backend definitively rejects the token.
+        Raises :class:`BackendUnavailableError` (-> 5xx) when the backend cannot answer
+        and the token has not been confirmed within ``TOKEN_GRACE_TTL``.
+        """
+        if token.startswith(REFRESH_TOKEN_PREFIX):
+            return None  # a refresh token is not a bearer credential
+        user_id = await self._resolve_user(token)
+        if user_id is _REJECTED:
+            return None
+        return AccessToken(token=token, client_id="", scopes=[], subject=user_id)
+
+    async def _resolve_user(self, token: str) -> "Optional[str] | object":
+        """Return the token's user id, or ``_REJECTED`` if the backend refuses it.
+
+        Uses the positive cache, retries transient failures, and falls back to a
+        recent confirmation when the backend is unavailable.
+        """
+        key = _token_key(token)
+        now = time.monotonic()
+        cached = _validated.get(key)
+        if cached and now - cached[1] < TOKEN_CACHE_TTL:
+            return cached[0]
+
+        verdict, user_id = await self._validate_with_backend(token)
+        for _ in range(TOKEN_VALIDATION_RETRIES):
+            if verdict is not _Verdict.UNAVAILABLE:
+                break
+            await asyncio.sleep(TOKEN_VALIDATION_RETRY_DELAY)
+            verdict, user_id = await self._validate_with_backend(token)
+
+        if verdict is _Verdict.VALID:
+            _validated[key] = (user_id, time.monotonic())
+            return user_id
+        if verdict is _Verdict.INVALID:
+            _validated.pop(key, None)
+            return _REJECTED
+
+        if cached and now - cached[1] < TOKEN_GRACE_TTL:
+            _log.warning(
+                "Backend unavailable; accepting token last confirmed %.0fs ago (grace %ss).",
+                now - cached[1],
+                TOKEN_GRACE_TTL,
+            )
+            return cached[0]
+        raise BackendUnavailableError(
+            f"Could not validate token: backend {self._api_url} unavailable and no recent confirmation."
+        )
+
+    async def _validate_with_backend(self, token: str) -> tuple[_Verdict, Optional[str]]:
+        """One ``whoami`` round trip, classified as valid / invalid / unavailable."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as http:
+            async with httpx.AsyncClient(timeout=TOKEN_VALIDATION_TIMEOUT) as http:
                 response = await http.get(
                     f"{self._api_url}/v1/cli/auth/whoami",
                     headers={CLI_TOKEN_HEADER: token},
                 )
-            if response.status_code != 200:
-                _log.warning(
-                    "Token validation failed: backend returned %s from %s/v1/cli/auth/whoami",
-                    response.status_code,
-                    self._api_url,
-                )
-                return None
-            user_id: Optional[str] = response.json().get("user_id")
         except Exception as exc:  # noqa: BLE001
             _log.error(
                 "Token validation error: could not reach %s/v1/cli/auth/whoami — %s: %s. "
@@ -193,16 +315,33 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
                 type(exc).__name__,
                 exc,
             )
-            return None
-        return AccessToken(token=token, client_id="", scopes=[], subject=user_id)
+            return _Verdict.UNAVAILABLE, None
+
+        if response.status_code == 200:
+            try:
+                return _Verdict.VALID, response.json().get("user_id")
+            except Exception:  # noqa: BLE001
+                _log.error("Token validation error: whoami returned a non-JSON 200 body.")
+                return _Verdict.UNAVAILABLE, None
+        if response.status_code in (401, 403):
+            _log.warning("Token validation failed: backend returned %s (token rejected).", response.status_code)
+            return _Verdict.INVALID, None
+        _log.error(
+            "Token validation error: backend returned %s from %s/v1/cli/auth/whoami (treated as unavailable).",
+            response.status_code,
+            self._api_url,
+        )
+        return _Verdict.UNAVAILABLE, None
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         """Best-effort revocation via the backend logout endpoint."""
+        raw = _cli_token_from_refresh(token.token) or token.token
+        _validated.pop(_token_key(raw), None)
         try:
-            async with httpx.AsyncClient(timeout=10.0) as http:
+            async with httpx.AsyncClient(timeout=TOKEN_VALIDATION_TIMEOUT) as http:
                 await http.post(
                     f"{self._api_url}/v1/cli/auth/logout",
-                    headers={CLI_TOKEN_HEADER: token.token},
+                    headers={CLI_TOKEN_HEADER: raw},
                 )
         except Exception:  # noqa: BLE001
             pass

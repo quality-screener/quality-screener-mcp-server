@@ -16,7 +16,12 @@ without requiring an external OAuth service.  The flow:
 5. ``load_access_token()`` validates incoming bearer tokens by calling the
    backend ``GET /v1/cli/auth/whoami`` endpoint on every authenticated request.
 
-All state is in-memory; suitable for single-process local and Railway deployments.
+OAuth *access* tokens are already serverless-safe: they are the backend CLI
+token, validated on every request. Pending-state, authorization-code, and
+dynamic-client records are not. When ``QSCREENER_OAUTH_SIGNING_KEY`` is set
+those three become HMAC-signed JWTs (no shared store), which is what Vercel
+needs. When the key is unset the original in-memory + on-disk behaviour is
+kept so a single-process Railway / Docker / local deploy needs no new env.
 """
 
 import json
@@ -26,9 +31,10 @@ import secrets
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
+import jwt
 
 _log = logging.getLogger(__name__)
 from mcp.server.auth.provider import (
@@ -48,8 +54,16 @@ from qscreener_mcp.constants import (
     CLI_TOKEN_HEADER,
     DEFAULT_CONFIG_DIR_PARTS,
     ENV_CONFIG_DIR,
+    ENV_OAUTH_SIGNING_KEY,
     MCP_CLIENTS_FILENAME,
+    SIGNED_CLIENT_TTL,
+    SIGNED_TYP_CLIENT,
+    SIGNED_TYP_CODE,
+    SIGNED_TYP_PENDING,
 )
+
+_JWT_ALG = "HS256"
+_JWT_REGISTERED_CLAIMS = frozenset({"iat", "nbf", "exp", "typ"})
 
 
 def _clients_file() -> Path:
@@ -73,30 +87,136 @@ def _save_clients(clients: dict[str, OAuthClientInformationFull]) -> None:
         pass
 
 
-# In-memory stores (single-process only).
+# In-memory stores (single-process cache; source of truth is a signed JWT when
+# a signing key is configured).
 _clients: dict[str, OAuthClientInformationFull] = _load_clients()
 # internal_state → pending OAuth session metadata
 _pending: dict[str, dict] = {}
 # authorization_code → CLI token + OAuth metadata
 _codes: dict[str, dict] = {}
+# Module-level copy so :func:`store_auth_code` (called from the HTTP route)
+# can verify signed state without threading the provider instance.
+_signing_key: Optional[str] = None
+
+
+def _resolve_signing_key(explicit: Optional[str]) -> Optional[str]:
+    """Return a stripped signing key, or ``None`` when unsigned mode is intended."""
+    if explicit is None:
+        explicit = os.environ.get(ENV_OAUTH_SIGNING_KEY)
+    if not explicit:
+        return None
+    key = explicit.strip()
+    return key or None
+
+
+def _sign(payload: dict[str, Any], key: str, ttl: Optional[int], typ: str) -> str:
+    """Encode ``payload`` as an HS256 JWT with a ``typ`` claim."""
+    now = int(time.time())
+    body = {**payload, "typ": typ, "iat": now, "nbf": now}
+    if ttl is not None:
+        body["exp"] = now + ttl
+    return jwt.encode(body, key, algorithm=_JWT_ALG)
+
+
+def _unsign(token: str, key: str, typ: str) -> Optional[dict[str, Any]]:
+    """Decode a JWT produced by :func:`_sign`, or ``None`` if it is invalid."""
+    try:
+        data = jwt.decode(token, key, algorithms=[_JWT_ALG])
+    except jwt.PyJWTError:
+        return None
+    if not isinstance(data, dict) or data.get("typ") != typ:
+        return None
+    return data
+
+
+def _pending_from_state(internal_state: str) -> Optional[dict[str, Any]]:
+    """Pop a pending session from memory, or decode a signed state JWT."""
+    pending = _pending.pop(internal_state, None)
+    if pending is not None:
+        return pending
+    if not _signing_key:
+        return None
+    data = _unsign(internal_state, _signing_key, SIGNED_TYP_PENDING)
+    if data is None:
+        return None
+    return {
+        "client_id": data["client_id"],
+        "redirect_uri": data["redirect_uri"],
+        "oauth_state": data.get("oauth_state"),
+        "code_challenge": data["code_challenge"],
+        "scopes": data.get("scopes") or [],
+    }
+
+
+def _code_entry(authorization_code: str) -> Optional[dict[str, Any]]:
+    """Return a code record from memory or by decoding a signed code JWT."""
+    entry = _codes.get(authorization_code)
+    if entry is not None:
+        return entry
+    if not _signing_key:
+        return None
+    data = _unsign(authorization_code, _signing_key, SIGNED_TYP_CODE)
+    if data is None:
+        return None
+    return {
+        "cli_token": data["cli_token"],
+        "client_id": data["client_id"],
+        "redirect_uri": data["redirect_uri"],
+        "code_challenge": data["code_challenge"],
+        "scopes": data.get("scopes") or [],
+        "expires_at": data.get("exp") or time.time(),
+    }
 
 
 class StobotOAuthProvider(OAuthAuthorizationServerProvider):
     """OAuth AS that bridges FastMCP auth to the stobot CLI token system."""
 
-    def __init__(self, api_url: str, website_url: str, mcp_public_url: str) -> None:
+    def __init__(
+        self,
+        api_url: str,
+        website_url: str,
+        mcp_public_url: str,
+        signing_key: Optional[str] = None,
+    ) -> None:
         self._api_url = api_url.rstrip("/")
         self._website_url = website_url.rstrip("/")
         self._mcp_public_url = mcp_public_url.rstrip("/")
+        self._signing_key = _resolve_signing_key(signing_key)
+        global _signing_key
+        _signing_key = self._signing_key
 
     # ------------------------------------------------------------------ #
     # Dynamic client registry                                              #
     # ------------------------------------------------------------------ #
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return _clients.get(client_id)
+        found = _clients.get(client_id)
+        if found is not None:
+            return found
+        if not self._signing_key:
+            return None
+        data = _unsign(client_id, self._signing_key, SIGNED_TYP_CLIENT)
+        if data is None:
+            return None
+        payload = {k: v for k, v in data.items() if k not in _JWT_REGISTERED_CLAIMS}
+        payload["client_id"] = client_id
+        try:
+            info = OAuthClientInformationFull.model_validate(payload)
+        except Exception:  # noqa: BLE001
+            return None
+        _clients[client_id] = info
+        return info
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        if self._signing_key:
+            payload = client_info.model_dump(mode="json")
+            payload.pop("client_id", None)
+            # Mutate in place so the registration handler returns the signed id.
+            client_info.client_id = _sign(
+                payload, self._signing_key, SIGNED_CLIENT_TTL, SIGNED_TYP_CLIENT
+            )
+        if not client_info.client_id:
+            raise ValueError("client_id is required to register a client")
         _clients[client_info.client_id] = client_info
         _save_clients(_clients)
 
@@ -106,14 +226,18 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         """Redirect to the web app's /cli-auth bridge, pointing back to /oauth/callback."""
-        internal_state = secrets.token_urlsafe(24)
-        _pending[internal_state] = {
+        pending = {
             "client_id": client.client_id,
             "redirect_uri": str(params.redirect_uri),
             "oauth_state": params.state,
             "code_challenge": params.code_challenge,
             "scopes": params.scopes or [],
         }
+        if self._signing_key:
+            internal_state = _sign(pending, self._signing_key, AUTH_CODE_TTL, SIGNED_TYP_PENDING)
+        else:
+            internal_state = secrets.token_urlsafe(24)
+        _pending[internal_state] = pending
         callback_url = f"{self._mcp_public_url}/oauth/callback"
         qs = urllib.parse.urlencode({"callback_url": callback_url, "state": internal_state})
         return f"{self._website_url}/cli-auth?{qs}"
@@ -121,7 +245,7 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
-        entry = _codes.get(authorization_code)
+        entry = _code_entry(authorization_code)
         if not entry:
             return None
         if entry["expires_at"] < time.time():
@@ -144,6 +268,8 @@ class StobotOAuthProvider(OAuthAuthorizationServerProvider):
     ) -> OAuthToken:
         """Return the CLI token as the OAuth access token (no separate token minted)."""
         entry = _codes.pop(authorization_code.code, None)
+        if entry is None:
+            entry = _code_entry(authorization_code.code)
         if not entry:
             raise TokenError(error="invalid_grant", error_description="Code not found or already used.")
         return OAuthToken(access_token=entry["cli_token"], token_type="Bearer")
@@ -222,11 +348,10 @@ def store_auth_code(internal_state: str, cli_token: str) -> Optional[str]:
         The redirect URL to send the browser to (client's ``redirect_uri`` with
         ``code`` and ``state`` appended), or ``None`` if the state is unknown.
     """
-    pending = _pending.pop(internal_state, None)
+    pending = _pending_from_state(internal_state)
     if not pending:
         return None
-    code = secrets.token_urlsafe(32)
-    _codes[code] = {
+    record = {
         "cli_token": cli_token,
         "client_id": pending["client_id"],
         "redirect_uri": pending["redirect_uri"],
@@ -234,4 +359,20 @@ def store_auth_code(internal_state: str, cli_token: str) -> Optional[str]:
         "scopes": pending["scopes"],
         "expires_at": time.time() + AUTH_CODE_TTL,
     }
+    if _signing_key:
+        code = _sign(
+            {
+                "cli_token": cli_token,
+                "client_id": pending["client_id"],
+                "redirect_uri": pending["redirect_uri"],
+                "code_challenge": pending["code_challenge"],
+                "scopes": pending["scopes"],
+            },
+            _signing_key,
+            AUTH_CODE_TTL,
+            SIGNED_TYP_CODE,
+        )
+    else:
+        code = secrets.token_urlsafe(32)
+    _codes[code] = record
     return construct_redirect_uri(pending["redirect_uri"], code=code, state=pending["oauth_state"])

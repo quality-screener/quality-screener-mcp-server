@@ -9,6 +9,9 @@ dependencies = [
     # httpx is a transitive dependency of mcp, but listed explicitly so the
     # version constraint is clear and the dependency is visible.
     "httpx>=0.27",
+    # FastAPI is the Vercel Python framework preset. The MCP server itself is
+    # Starlette (via FastMCP); app.py wraps it so Vercel loads a FastAPI `app`.
+    "fastapi>=0.115",
 ]
 
 [project.scripts]
@@ -29,3 +32,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.vercel]
+entrypoint = "app:app"
+

@@ -51,9 +51,12 @@ Four modules under `qscreener_mcp/`:
   `X-Stobot-CLI-Token`, adds the analytics headers, decodes JSON (`None` for empty
   bodies), raises `ApiError` on any non-2xx. Self-contained copy of the backend CLI's
   client — keep it dependency-free.
-- **`oauth.py`** — `StobotOAuthProvider` for HTTP mode. OAuth state is **in-memory**
-  (`_pending`, `_codes`) → single-process only. Registered clients persist to
-  `~/.config/qscreener/mcp_clients.json`.
+- **`oauth.py`** — `StobotOAuthProvider` for HTTP mode. Access tokens *are* the
+  backend CLI token (validated via whoami). Pending state, auth codes, and
+  client registrations are HMAC-signed JWTs when `$QSCREENER_OAUTH_SIGNING_KEY`
+  is set (Vercel / multi-instance); otherwise they stay in-memory (`_pending`,
+  `_codes`) with clients also written to
+  `$QSCREENER_CONFIG_DIR/mcp_clients.json` (single-process Railway / local).
 
 ### Cross-cutting patterns
 
@@ -79,7 +82,7 @@ result becomes `{"status": "ok"}`.
 
 - **`stdio`** (default; local agent as a subprocess): token from env var or credentials
   file. No OAuth.
-- **`streamable-http`** (remote deploy, e.g. Railway): full MCP OAuth, served at `/mcp`.
+- **`streamable-http`** (remote deploy, e.g. Railway or Vercel): full MCP OAuth, served at `/mcp`.
   The provider **mints no tokens of its own** — it bridges to the backend's CLI-token
   system. The web app's `/cli-auth` page exchanges the user's session for a CLI token and
   posts it to `/oauth/callback` (`server._oauth_callback` → `oauth.store_auth_code`); that

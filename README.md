@@ -31,6 +31,7 @@ same data they see in the web dashboard.
 - [Working with `CustomScoreConfig`](#working-with-customscoreconfig)
 - [Connecting an MCP client](#connecting-an-mcp-client)
 - [Deployment](#deployment)
+- [Deploy on Vercel](#deploy-on-vercel)
 - [Development](#development)
 - [Privacy Policy](#privacy-policy)
 - [Support](#support)
@@ -129,7 +130,8 @@ All configuration is via environment variables, resolved at startup.
 | `QSCREENER_API_URL` | `http://localhost:8001` | Base URL of the Quality Screener backend API the tools call |
 | `QSCREENER_MCP_TRANSPORT` | `stdio` | `stdio`, `streamable-http`, or `sse` |
 | `QSCREENER_WEBSITE_URL` | `http://localhost:3001` | Web-app base URL used to build the OAuth browser-login link and shareable screen URLs |
-| `QSCREENER_MCP_PUBLIC_URL` | `http://localhost:{PORT\|8080}` | Publicly reachable base URL of this server; used to build the OAuth callback URL |
+| `QSCREENER_MCP_PUBLIC_URL` | `http://localhost:{PORT\|8080}` (or `https://$VERCEL_URL` on Vercel) | Publicly reachable base URL of this server; used as the OAuth issuer and callback URL |
+| `QSCREENER_OAUTH_SIGNING_KEY` | — | HMAC key for signed OAuth state, authorization codes, and client registrations. Required on Vercel; optional on a single long-lived process |
 | `PORT` | — | Bind port for HTTP transports (Railway sets this automatically) |
 | `QSCREENER_MCP_PORT` | `8080` | Bind port fallback when `PORT` is unset |
 | `QSCREENER_MCP_HOST` | `0.0.0.0` | Bind host for HTTP transports |
@@ -160,7 +162,12 @@ MCP OAuth flow:
 
 The token is validated on each request by calling the backend's
 `/v1/cli/auth/whoami` endpoint, so a revoked or expired token is rejected
-immediately. The server never persists user tokens.
+immediately. The server never persists user tokens. Access tokens *are* the
+CLI token, so they need no local store. Pending login state, authorization
+codes, and dynamically registered clients are HMAC-signed JWTs when
+`QSCREENER_OAUTH_SIGNING_KEY` is set, which is what a multi-instance host
+(Vercel) needs; a single process without the key keeps the original
+in-memory behaviour.
 
 ### Local (stdio)
 
@@ -411,6 +418,49 @@ The server deploys as a single container. On [Railway](https://railway.app):
 
 ---
 
+## Deploy on Vercel
+
+The same ASGI app that Docker/Railway serve via `mcp.run()` is exported from
+`app.py` as a FastAPI `app` so Vercel’s Python runtime can host it as one
+Function. The FastMCP app already listens on `/mcp`, `/.well-known/*`,
+`/authorize`, `/token`, `/register`, and `/oauth/callback`; Vercel routes
+every request to that Function with the original path, so those URLs resolve
+without remapping. `vercel.json` only sets `maxDuration` (60s) on `app.py`.
+
+Do **not** rewrite `/mcp` (or the OAuth paths) onto `/` — FastMCP matches the
+literal paths.
+
+Create a Vercel project pointed at this repository (Framework Preset: FastAPI
+/ Other, Root Directory: repository root). Set these environment variables —
+names only; never commit values:
+
+| Env var | Required | What it is for |
+| --- | --- | --- |
+| `QSCREENER_API_URL` | yes | Base URL of the Quality Screener backend the tools call |
+| `QSCREENER_WEBSITE_URL` | yes | Web-app origin used for the OAuth browser login and shareable screen links |
+| `QSCREENER_MCP_PUBLIC_URL` | yes on a custom domain | Public origin of *this* deployment (OAuth issuer + `/oauth/callback`). Preview deploys can omit it and will use `https://$VERCEL_URL` |
+| `QSCREENER_OAUTH_SIGNING_KEY` | yes | HMAC secret used to sign OAuth pending-state, authorization codes, and dynamic client registrations so they survive across Function invocations. Use a long random string (32+ bytes) |
+
+Vercel injects `VERCEL_URL` automatically (hostname, no scheme). It is only a
+fallback issuer when `QSCREENER_MCP_PUBLIC_URL` is unset. Do not use it as
+the production issuer if the MCP client will connect via a custom domain.
+
+These are **not** required on Vercel (the `app.py` entrypoint is always HTTP,
+and the Function does not bind a port):
+
+- `QSCREENER_MCP_TRANSPORT`
+- `QSCREENER_MCP_HOST`
+- `QSCREENER_MCP_PORT` / `PORT`
+- `QSCREENER_TOKEN`
+- `QSCREENER_CONFIG_DIR`
+
+After deploy the MCP endpoint is `https://<vercel-domain>/mcp`. Point an MCP
+client at that URL the same way as the Railway deployment. Raise
+`functions["app.py"].maxDuration` in `vercel.json` if custom scoring hits the
+60s cap.
+
+---
+
 ## Development
 
 ```bash
@@ -425,6 +475,7 @@ The codebase is small and self-contained:
 | `qscreener_mcp/server.py` | FastMCP server, tool definitions, transport entry point |
 | `qscreener_mcp/client.py` | Minimal httpx client that attaches the bearer token |
 | `qscreener_mcp/oauth.py` | MCP OAuth 2.0 provider (token validation, browser flow) |
+| `app.py` | Vercel FastAPI entrypoint that mounts the streamable-HTTP ASGI app |
 | `tests/` | pytest suite (token resolution, filter forwarding, share-link building) |
 
 ---

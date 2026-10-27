@@ -7,11 +7,12 @@ Runs in two transport modes, selected by ``QSCREENER_MCP_TRANSPORT``:
   or ``~/.config/qscreener/credentials.json`` (written by
   ``qscreener auth login``).
 
-* ``streamable-http`` — for remote deployments (e.g. Railway).  Authentication
-  is handled end-to-end via MCP OAuth 2.0: the MCP client discovers the
-  authorization server, opens the user's browser once, and thereafter sends
-  ``Authorization: Bearer <cli-token>`` automatically.  No manual token
-  copy-paste required.
+* ``streamable-http`` — for remote deployments (Railway, Vercel, or any ASGI
+  host).  Authentication is handled end-to-end via MCP OAuth 2.0: the MCP
+  client discovers the authorization server, opens the user's browser once,
+  and thereafter sends ``Authorization: Bearer <cli-token>`` automatically.
+  No manual token copy-paste required.  HTTP mode is stateless
+  (``stateless_http`` + JSON responses) so it survives serverless invocations.
 
 Environment variables
 ---------------------
@@ -19,8 +20,12 @@ QSCREENER_API_URL         Backend API base URL (default http://localhost:8001)
 QSCREENER_WEBSITE_URL     Web-app base URL for the OAuth browser redirect
                           (default http://localhost:3001)
 QSCREENER_MCP_PUBLIC_URL  Publicly reachable base URL of this MCP server;
-                          used to build the OAuth callback URL
-                          (default http://localhost:{PORT|QSCREENER_MCP_PORT|8080})
+                          used as the OAuth issuer and callback URL
+                          (default: ``https://$VERCEL_URL`` on Vercel, else
+                          http://localhost:{PORT|QSCREENER_MCP_PORT|8080})
+QSCREENER_OAUTH_SIGNING_KEY
+                          HMAC key for signed OAuth state / codes / clients.
+                          Required on Vercel; optional on a single process.
 QSCREENER_TOKEN           Bearer-token override for stdio mode (optional)
 QSCREENER_MCP_TRANSPORT   stdio | streamable-http | sse  (default stdio)
 PORT / QSCREENER_MCP_PORT Bind port for HTTP transports (Railway sets PORT)
@@ -58,6 +63,7 @@ from qscreener_mcp.constants import (
     ENV_MCP_TRANSPORT,
     ENV_PLATFORM_PORT,
     ENV_TOKEN,
+    ENV_VERCEL_URL,
     ENV_WEBSITE_URL,
     NOT_AUTHENTICATED,
     OAUTH_FAILURE_HTML,
@@ -86,7 +92,19 @@ def _port() -> str:
 
 
 def _public_url() -> str:
-    return os.environ.get(ENV_MCP_PUBLIC_URL, f"http://localhost:{_port()}").rstrip("/")
+    """Public base URL used as the OAuth issuer and callback prefix.
+
+    Precedence: ``QSCREENER_MCP_PUBLIC_URL`` → ``https://$VERCEL_URL`` (preview
+    deploys) → ``http://localhost:{port}``.
+    """
+    if configured := os.environ.get(ENV_MCP_PUBLIC_URL):
+        return configured.rstrip("/")
+    vercel = (os.environ.get(ENV_VERCEL_URL) or "").strip().rstrip("/")
+    if vercel:
+        if vercel.startswith("http://") or vercel.startswith("https://"):
+            return vercel
+        return f"https://{vercel}"
+    return f"http://localhost:{_port()}"
 
 
 _PUBLIC_URL: str = _public_url()
@@ -104,6 +122,8 @@ _oauth = StobotOAuthProvider(
 mcp = FastMCP(
     "qscreener",
     host=_MCP_HOST,
+    json_response=True,
+    stateless_http=True,
     auth_server_provider=_oauth,
     auth=AuthSettings(
         issuer_url=f"{_PUBLIC_URL}/",
@@ -111,6 +131,14 @@ mcp = FastMCP(
         client_registration_options=ClientRegistrationOptions(enabled=True),
     ),
 )
+
+
+def http_app():
+    """Return the streamable-HTTP ASGI app (MCP at ``/mcp`` plus OAuth routes).
+
+    Used by the Vercel entrypoint. Docker / Railway still call ``mcp.run()``.
+    """
+    return mcp.streamable_http_app()
 
 # ------------------------------------------------------------------ #
 # OAuth browser-callback route                                         #
@@ -854,6 +882,7 @@ def main() -> None:
     For HTTP transports the server binds to ``QSCREENER_MCP_HOST``
     (default ``0.0.0.0``) and ``$PORT`` / ``QSCREENER_MCP_PORT``
     (default ``8080``), serving MCP at ``/mcp`` and OAuth at standard paths.
+    The same ASGI app is exported for Vercel via :func:`http_app`.
     """
     transport = os.environ.get(ENV_MCP_TRANSPORT, DEFAULT_TRANSPORT).strip().lower()
     if transport == DEFAULT_TRANSPORT:

@@ -53,9 +53,15 @@ ENV_MCP_PORT = "QSCREENER_MCP_PORT"
 ENV_MCP_TRANSPORT = "QSCREENER_MCP_TRANSPORT"
 ENV_TOKEN = "QSCREENER_TOKEN"
 ENV_CONFIG_DIR = "QSCREENER_CONFIG_DIR"
+ENV_OAUTH_SIGNING_KEY = "QSCREENER_OAUTH_SIGNING_KEY"
 
 # Set by the hosting platform (Railway), and takes precedence over ENV_MCP_PORT.
 ENV_PLATFORM_PORT = "PORT"
+
+# Set by Vercel on every deployment (hostname, no scheme). Used as a fallback
+# issuer / public URL when ENV_MCP_PUBLIC_URL is unset so preview deploys work
+# without a hand-written URL.
+ENV_VERCEL_URL = "VERCEL_URL"
 
 # ------------------------------------------------------------------ #
 # Defaults                                                             #
@@ -87,6 +93,16 @@ MCP_CLIENTS_FILENAME = "mcp_clients.json"
 
 # Seconds. Codes are exchanged immediately; ten minutes is generous.
 AUTH_CODE_TTL = 600
+
+# Seconds. Signed client registrations are persisted by the MCP client and
+# reused across sessions, so they must outlive a single login. Ten years.
+SIGNED_CLIENT_TTL = 10 * 365 * 24 * 3600
+
+# ``typ`` claim on HMAC-signed JWTs so a pending-state blob cannot be
+# replayed as an authorization code or a client_id.
+SIGNED_TYP_PENDING = "pend"
+SIGNED_TYP_CODE = "code"
+SIGNED_TYP_CLIENT = "client"
 
 # ------------------------------------------------------------------ #
 # User-facing messages                                                 #

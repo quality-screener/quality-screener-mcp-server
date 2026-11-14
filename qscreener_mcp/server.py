@@ -480,6 +480,8 @@ def scores_list(
 ) -> dict:
     """List scored tickers with optional filters. Market caps are in USD.
 
+    The universe is ≈40,000 companies across 100+ countries and 67 exchanges. Results are for informational purposes only and are not investment advice.
+
     Rows are slimmed for MCP by default (``duplicates`` as ticker strings, ``description``
     truncated); pass ``full_rows=True`` for the raw backend payload.
     """
@@ -583,6 +585,8 @@ def score_compute(
     include_duplicates: bool = False,
 ) -> dict:
     """Compute custom scores from a CustomScoreConfig, scored against a chosen peer group.
+
+    Results are for informational purposes only and are not investment advice.
 
     The ``config`` is a CustomScoreConfig: weighted metric ``groups`` (each with weighted
     ``metrics``) plus scoring parameters ``winsorizePercentile`` (1-10), ``missingDataPercentile``

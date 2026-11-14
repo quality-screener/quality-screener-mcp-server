@@ -5,6 +5,11 @@ server that exposes the [Quality Screener](https://qualityscreener.io)
 stock-screening engine as tools for AI agents (Claude, Cursor, and any other MCP
 client).
 
+The served universe is ≈40,000 scored companies across 100+ countries and 67
+exchanges (canonical listings as of 14 Nov 2026; Argentine ``.BA`` symbols and
+preferred shares are excluded). Quality Screener is for informational and
+educational purposes only and does not constitute investment advice.
+
 Once connected, an agent can screen and filter the scored universe, compute
 custom quality scores, inspect score history, manage saved scoring systems, and
 generate shareable screen links — **acting as the signed-in user**, against the

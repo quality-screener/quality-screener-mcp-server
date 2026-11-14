@@ -81,3 +81,31 @@ def test_public_url_localhost_default(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_app_py_exists_at_repo_root() -> None:
     """Vercel’s Python preset looks for app.py next to pyproject.toml."""
     assert (Path(__file__).resolve().parents[1] / "app.py").is_file()
+
+
+def test_mcp_http_methods_on_vercel_app() -> None:
+    """GET/HEAD /mcp return 405; POST still reaches the MCP handler.
+
+    A single TestClient context is required: StreamableHTTPSessionManager.run()
+    can only start once on the module-level Vercel ``app``.
+    """
+    from fastapi.testclient import TestClient
+
+    import app as vercel_app
+
+    with TestClient(vercel_app.app) as client:
+        for path in ("/mcp", "/mcp/"):
+            response = client.get(path)
+            assert response.status_code == 405, path
+            assert "POST" in response.headers.get("allow", "")
+
+        head = client.head("/mcp")
+        assert head.status_code == 405
+        assert "POST" in head.headers.get("allow", "")
+
+        posted = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        )
+        assert posted.status_code != 405
+        assert posted.status_code < 500

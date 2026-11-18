@@ -487,8 +487,8 @@ The codebase is small and self-contained:
 
 ## Privacy Policy
 
-The full privacy policy is published at **[PRIVACY.md](PRIVACY.md)**
-(<https://github.com/quality-screener/quality-screener-mcp-server/blob/main/PRIVACY.md>).
+The Quality Screener privacy policy at <https://qualityscreener.io/privacy>
+applies to this MCP server (see also [PRIVACY.md](PRIVACY.md)).
 
 In short:
 
